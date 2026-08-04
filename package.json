@@ -1,0 +1,26 @@
+{
+  "name": "@heroplus/fe-test-kit",
+  "version": "0.1.0",
+  "description": "Shared fixture-corpus integrity engine for the HeroPlus FE repos",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hero-Plus/fe-test-kit.git"
+  },
+  "type": "module",
+  "main": "index.mjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "hp-fixtures-verify": "./verify.mjs",
+    "hp-fixtures-no-pan": "./checks/no-pan.mjs",
+    "hp-fixtures-cell-map": "./checks/cell-map.mjs",
+    "hp-fixtures-config-test": "./config-test.mjs",
+    "hp-fixtures-luhn-test": "./lib/luhn-test.mjs",
+    "hp-fixtures-shapes-test": "./shapes-test.mjs"
+  },
+  "scripts": {
+    "test": "node --test config-test.mjs && node --test lib/luhn-test.mjs && node --test shapes-test.mjs"
+  }
+}

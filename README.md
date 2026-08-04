@@ -101,21 +101,40 @@ turn deleting a check into a behaviour change with no diff.
 Entries marked `required` fail the run when the file is missing. Inside a package that can only mean
 the package did not ship the file, since `verify.mjs` resolves each entry against its own directory.
 
-## Caveat — a green run is not proof the seam is wired
+## Outcomes
 
-Several checks are built to exit 0 with a printed `skipped` when the thing they read is absent, so a
-repo that has not adopted every part of the corpus architecture is not blocked by checks that cannot
-apply to it. `verify.mjs` tallies exit 0 as `PASS`. **A check that asserted nothing therefore prints
-`PASS`, and `SKIP` in the summary means only that a check file was absent.**
+| Exit | Summary tag | Meaning |
+|---|---|---|
+| 0 | `PASS` | the check asserted something and it held |
+| 1 | `FAIL` | the check asserted something and it did not hold |
+| 2 | `FAIL (exit 2)` | setup error — unusable config, unreadable corpus, malformed manifest |
+| 3 | `VACUOUS` | the check ran but asserted nothing, because a config artifact it reads is absent |
+| — | `SKIP` | the check *file* was absent, which inside this package means a packaging failure |
 
-So `HP_FIXTURES_CONFIG` pointing at a *readable but wrong* tree can produce an all-`PASS` run. Most
-mis-wirings are caught — an unresolvable path, a missing contract name, and an empty or thin corpus
-all fail loudly — but a wrong tree that happens to hold a parseable corpus registry, a clean git
-`HEAD` and no committed manifest will report green.
+`verify.mjs` exits 2 if any check hit a setup error, 1 if any check failed, 3 if any check was vacuous,
+and 0 only when every check asserted something.
 
-Treat the value you set as load-bearing, and check that the counts each run prints are the counts you
-expect. Giving "asserted nothing" an outcome of its own, distinct from `PASS`, is the next version's
-job.
+**A vacuous check fails the run.** Three branches reach it — `rule-coverage` with no rule spec,
+`cell-map` with no committed manifest, `no-pan` with no corpus root. Each one previously exited 0 and
+was tallied as a pass, which meant a wholly wrong `HP_FIXTURES_CONFIG` could produce an all-`PASS` run.
+If a repo legitimately does not carry one of these artifacts, drop that check from `CHECKS` so the
+decision has a diff — do not leave it reporting green over nothing.
+
+## Caveat — what a green run still does not prove
+
+Config-absence no longer hides in a `PASS`; that is what exit 3 is for. Two vacuous cases remain, and
+both are environmental rather than config-driven:
+
+- **`verbatim` and `origin-set` on a fresh checkout.** Both compare the working tree against `HEAD`, so
+  on a clean tree they compare `HEAD` with itself. They print `ASSERTED NOTHING` with the reason and
+  still exit 0 — deliberately. They are pre-commit guards, and there is no CI position where they can
+  go red only for a real reason. `actions/checkout@v4` clones at depth 1, so this is the normal CI
+  state, and converting it would redden every run.
+- **`no-pan` over a thin corpus.** It scans whatever the corpus holds; a corpus holding one file is
+  scanned honestly and passes honestly.
+
+So read the counts each check prints, not just the tag. `no-pan` printing `scanning … — 0 file(s)` is a
+different fact from `31 file(s)`, and only the second means your corpus was examined.
 
 ## Conventions
 

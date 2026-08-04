@@ -16,6 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { enumerateCells, REGISTRY_RELATIVE } from '../lib/cells.mjs';
+import { VACUOUS } from '../lib/exit-codes.mjs';
 import { CELL_MANIFEST, CELL_MANIFEST_RELATIVE } from '../config.mjs';
 
 // Derived from this file's location rather than named: each package manager lays `node_modules` out
@@ -100,14 +101,15 @@ if (process.argv.includes('--write')) {
 }
 
 if (!existsSync(CELL_MANIFEST)) {
-  console.log(
-    `\ncell-map: skipped — ${CELL_MANIFEST_RELATIVE} does not exist in this repo.`
+  console.error(
+    `\ncell-map: asserted nothing — ${CELL_MANIFEST_RELATIVE} does not exist in this repo.`
   );
-  console.log(
-    '  Nothing pins the cell map yet. Generate and review it:\n' +
+  console.error(
+    `  ${live.cells.length} cell(s) resolved but nothing pins them, so no binding was checked.\n` +
+      '  Generate and review the manifest:\n' +
       `    ${REWRITE_COMMAND}`
   );
-  process.exit(0);
+  process.exit(VACUOUS);
 }
 
 let pinned;

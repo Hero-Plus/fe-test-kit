@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Runs every corpus-integrity check and the engine's own unit suites. Exit codes: 0 all passed, 1 at
-// least one failed, 2 a check hit a setup error.
+// least one failed, 2 a check hit a setup error, 3 a check ran but asserted nothing.
 //
 // The checks split on durability, and the split is easy to get backwards. `no-pan`, `cell-map` and
 // `rule-coverage` pin against a committed expectation, so they keep asserting after the change is
@@ -15,9 +15,12 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { VACUOUS } from './lib/exit-codes.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const GREEN = '\x1b[32m';
 const RED = '\x1b[31m';
+const YELLOW = '\x1b[33m';
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
 
@@ -65,6 +68,14 @@ for (const r of results) {
     );
     continue;
   }
+  // VACUOUS gets its own tag rather than reusing SKIP, which above means the check *file* was absent
+  // — a packaging failure inside this package, and a different problem from a check that ran.
+  if (r.code === VACUOUS) {
+    console.log(
+      `  ${YELLOW}VACUOUS${RESET}  ${r.name} ${DIM}(ran, asserted nothing)${RESET}`
+    );
+    continue;
+  }
   const tag = r.code === 0 ? `${GREEN}PASS${RESET}` : `${RED}FAIL${RESET}`;
   console.log(`  ${tag}  ${r.name}${r.code === 0 ? '' : ` (exit ${r.code})`}`);
 }
@@ -90,4 +101,16 @@ if (ran.length === 0) {
 // Deliberately not fail-fast: when a fixture change goes wrong, whether the other checks also broke
 // is the question you need answered on the first run.
 if (ran.some(r => r.code === 2)) process.exit(2);
-process.exit(ran.some(r => r.code !== 0) ? 1 : 0);
+
+const vacuous = ran.filter(r => r.code === VACUOUS);
+if (ran.some(r => r.code !== 0 && r.code !== VACUOUS)) process.exit(1);
+
+if (vacuous.length > 0) {
+  console.error(
+    `\n${RED}${vacuous.length} check(s) asserted nothing:${RESET} ${vacuous.map(r => r.name).join(', ')}.\n` +
+      'A run is not green because nothing objected. Wire the config each one names, or drop it from\n' +
+      'CHECKS in this file so the removal is a decision with a diff.'
+  );
+  process.exit(VACUOUS);
+}
+process.exit(0);

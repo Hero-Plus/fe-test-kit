@@ -17,6 +17,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 
+import { VACUOUS } from '../lib/exit-codes.mjs';
 import { digitsOf, isPanRun, PAN_CANDIDATE_PATTERNS } from '../lib/luhn.mjs';
 import {
   FIXTURES_DIR,
@@ -41,9 +42,15 @@ const root = resolveRoot(process.argv.slice(2));
 const rootLabel = root === FIXTURES_DIR ? FIXTURES_RELATIVE : root;
 
 if (!existsSync(root)) {
-  console.log(`no-pan: skipped — ${rootLabel} does not exist in this repo.`);
-  console.log('  Nothing to scan is not the same as nothing found.');
-  process.exit(0);
+  console.error(
+    `\nno-pan: asserted nothing — ${rootLabel} does not exist in this repo.`
+  );
+  console.error(
+    '  Nothing to scan is not the same as nothing found, and this is a card-number scanner: a green\n' +
+      '  run over an absent tree is the one result it must never report. Point HP_FIXTURES_CONFIG at\n' +
+      '  the repo holding the corpus.'
+  );
+  process.exit(VACUOUS);
 }
 
 const unscannable = [];

@@ -25,18 +25,21 @@ import {
   TRANSACTION_TABLES,
   TRANSACTION_TABLES_RELATIVE,
 } from '../config.mjs';
+import { VACUOUS } from '../lib/exit-codes.mjs';
 
 const EXEMPTIONS_RELATIVE = `${TOOLS_RELATIVE}/rule-coverage-exemptions.json`;
 const EXEMPTIONS = absolute(EXEMPTIONS_RELATIVE);
 
 if (!existsSync(TRANSACTION_TABLES)) {
-  console.log(
-    `rule-coverage: skipped — this repo has no ${TRANSACTION_TABLES_RELATIVE}.`
+  console.error(
+    `\nrule-coverage: asserted nothing — this repo has no ${TRANSACTION_TABLES_RELATIVE}.`
   );
-  console.log(
-    '  Nothing here declares which spec rules the repo claims to conform to, so there is no claim to back.'
+  console.error(
+    '  Nothing here declares which spec rules the repo claims to conform to, so there was no claim\n' +
+      '  to back. Either point HP_FIXTURES_CONFIG at a repo that carries the file, or drop this check\n' +
+      '  from CHECKS so the removal is a decision with a diff.'
   );
-  process.exit(0);
+  process.exit(VACUOUS);
 }
 
 let spec;

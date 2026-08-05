@@ -13,7 +13,8 @@
 // Durable after commit: it reads only the working tree, invokes no git and pins against no HEAD.
 //
 // Usage: hp-fixtures-no-pan [--root <dir>]
-// Exit codes: 0 pass, 1 a card-number shape reached the corpus, 2 setup error.
+// Exit codes: 0 pass, 1 a card-number shape reached the corpus, 2 setup error, 3 the corpus root is
+// absent so nothing was scanned — which fails the run.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 

@@ -1,7 +1,6 @@
 // The one specifier every check reaches host config through. A package cannot know the adopting
 // repo's layout, so the repo names its own path module on HP_FIXTURES_CONFIG and this file resolves
-// it — the role split the two filenames carry: the host module *is* the config, this one *resolves*
-// it across the package boundary.
+// it.
 import { HostConfigError, loadHostConfig } from './lib/host-config.mjs';
 
 let host;

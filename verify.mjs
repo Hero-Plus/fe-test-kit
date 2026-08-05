@@ -5,7 +5,8 @@
 // The checks split on durability, and the split is easy to get backwards. `no-pan`, `cell-map` and
 // `rule-coverage` pin against a committed expectation, so they keep asserting after the change is
 // committed; `verbatim` and `origin-set` compare against HEAD, so those two alone are pre-commit
-// guards that pass vacuously on a clean tree.
+// guards that assert nothing on a clean tree — and still exit 0 there, which is not the `VACUOUS`
+// outcome below.
 //
 // The list below is explicit rather than a directory read: auto-discovery would leave this file
 // byte-identical across the FE repos while making check-set divergence between them invisible, and

@@ -141,8 +141,9 @@ both are environmental rather than config-driven:
 Giving the environmental case an outcome of its own — so that `ASSERTED NOTHING` and `VACUOUS` stop
 being two vocabularies for one idea — is a v0.2.0 question, not a defect in this release.
 
-So read the counts each check prints, not just the tag. `no-pan` printing `scanning … — 0 file(s)` is a
-different fact from `31 file(s)`, and only the second means your corpus was examined.
+So read the counts each check prints, not just the tag: a corpus far smaller than you expect passes
+honestly and tells you so only in the numbers. An *empty* corpus needs no watching — `no-pan` exits 2
+on a root that holds no files, so a zero-file scan can never carry a green tag.
 
 ## Conventions
 

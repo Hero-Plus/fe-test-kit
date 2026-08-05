@@ -14,7 +14,8 @@
 // cited id the spec file does not carry is undecidable here: a real rule nobody adjudicated and a
 // mistyped one look identical. That is why the two citation classes below report and never fail.
 //
-// Exit codes: 0 pass, or the spec is absent; 1 an unbacked rule or a stale exemption; 2 setup error.
+// Exit codes: 0 pass, 1 an unbacked rule or a stale exemption, 2 setup error, 3 the spec is absent so
+// no claim was backed — which fails the run.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 

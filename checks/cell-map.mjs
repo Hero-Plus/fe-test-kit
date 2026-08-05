@@ -7,10 +7,12 @@
 //
 // This is the one corpus check that survives its own commit. It pins against the cell manifest,
 // invokes no git and reads no HEAD, so it keeps asserting after the change is committed — where
-// `verbatim` and `origin-set` go vacuous by construction.
+// `verbatim` and `origin-set` compare against HEAD and so have nothing left to compare once it is,
+// though they still exit 0.
 //
 // Usage: hp-fixtures-cell-map [--write] [--list]
-// Exit codes: 0 pass, 1 a cell moved or a count changed, 2 setup error.
+// Exit codes: 0 pass, 1 a cell moved or a count changed, 2 setup error, 3 no manifest pins the cells
+// so no binding was checked — which fails the run.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

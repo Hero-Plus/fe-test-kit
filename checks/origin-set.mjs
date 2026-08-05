@@ -4,9 +4,9 @@
 // passes every test, and turns a pinned wire record into a hand-written one with no other signal.
 //
 // Two halves on opposite sides of durability, and reading them as one is how a CI job ends up
-// trusted for something it never checked. The bucket comparison is working tree vs HEAD, so it is
-// vacuous once committed and `cell-map.mjs` is the durable guard for it. The corpus-root allowlist
-// reads only the filesystem and keeps asserting forever.
+// trusted for something it never checked. The bucket comparison is working tree vs HEAD, so once
+// committed it has nothing left to compare — while still exiting 0 — and `cell-map.mjs` is the durable
+// guard for it. The corpus-root allowlist reads only the filesystem and keeps asserting forever.
 //
 // Usage: no options; runs from hp-fixtures-verify
 // Exit codes: 0 pass, 1 a body changed bucket or an unclassified path appeared, 2 setup error.
@@ -114,7 +114,7 @@ for (const [basename, body] of head.map) {
 }
 
 // Path sets, not the three tallies above: those also all read zero for a body moved within one
-// bucket, which is a real difference this check correctly ignores rather than a vacuous run.
+// bucket, which is a real difference this check correctly ignores rather than a failure to compare.
 const relativesOf = side =>
   new Set([...side.map.values()].map(b => b.relative));
 const liveRelatives = relativesOf(live);

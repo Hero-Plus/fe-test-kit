@@ -6,7 +6,8 @@
 // Bodies are keyed by basename so the comparison survives a directory restructure: the body is the
 // same wire record wherever the tree puts it, and where it sits is `origin-set.mjs`'s question.
 //
-// Pre-commit guard, vacuous once committed by construction. `cell-map.mjs` is the durable guard.
+// Pre-commit guard: once the change is committed this compares HEAD with itself and has nothing left
+// to assert, though it still exits 0. `cell-map.mjs` is the durable guard.
 //
 // Usage: no options; runs from hp-fixtures-verify
 // Exit codes: 0 pass, 1 a captured body was altered or removed, 2 setup error.

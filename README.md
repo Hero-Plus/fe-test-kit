@@ -11,17 +11,26 @@ the same check came to exist.
 ## Install
 
 ```json
-"@heroplus/fe-test-kit": "Hero-Plus/fe-test-kit#v0.1.1"
+"@heroplus/fe-test-kit": "Hero-Plus/fe-test-kit#v0.1.3"
 ```
-
-**`v0.1.1` is the first consumable release. `v0.1.0` was withdrawn and its tag deleted** — in it,
-`verify.mjs` tallied a check that asserted nothing as `PASS`, so an `HP_FIXTURES_CONFIG` pointing at
-the wrong tree could read fully green. Exit 3 and the `VACUOUS` tag documented below are the fix. The
-commit stays in `main`'s history for provenance; do not recreate the tag.
 
 Public on purpose. A private git dependency cannot install where there is no credential — Vercel
 builds and GitHub Actions checkouts both lack one — and a per-machine token is the cost that ruled
 out a package registry.
+
+## Releasing
+
+**Bump `version` in `package.json` in the same commit as the change, before creating the tag.** Tagging
+first and bumping after produces a package whose declared version contradicts the tag that installed
+it, and the only way to correct it is another tag — which is why two are missing below.
+
+`main` carries two withdrawn tags' commits, both still reachable for provenance. Do not recreate
+either:
+
+| Tag | Why it is gone |
+|---|---|
+| `v0.1.0` | `verify.mjs` tallied a check that asserted nothing as `PASS`, so an `HP_FIXTURES_CONFIG` pointing at the wrong tree read fully green. Exit 3 and the `VACUOUS` tag are the fix. |
+| `v0.1.2` | Behaviour identical to `v0.1.3`, but its `package.json` declared `0.1.1` — tagged without bumping. |
 
 ## Configuration — `HP_FIXTURES_CONFIG`
 

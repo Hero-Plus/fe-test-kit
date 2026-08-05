@@ -11,8 +11,13 @@ the same check came to exist.
 ## Install
 
 ```json
-"@heroplus/fe-test-kit": "Hero-Plus/fe-test-kit#v0.1.0"
+"@heroplus/fe-test-kit": "Hero-Plus/fe-test-kit#v0.1.1"
 ```
+
+**`v0.1.1` is the first consumable release. `v0.1.0` was withdrawn and its tag deleted** — in it,
+`verify.mjs` tallied a check that asserted nothing as `PASS`, so an `HP_FIXTURES_CONFIG` pointing at
+the wrong tree could read fully green. Exit 3 and the `VACUOUS` tag documented below are the fix. The
+commit stays in `main`'s history for provenance; do not recreate the tag.
 
 Public on purpose. A private git dependency cannot install where there is no credential — Vercel
 builds and GitHub Actions checkouts both lack one — and a per-machine token is the cost that ruled
@@ -132,6 +137,9 @@ both are environmental rather than config-driven:
   state, and converting it would redden every run.
 - **`no-pan` over a thin corpus.** It scans whatever the corpus holds; a corpus holding one file is
   scanned honestly and passes honestly.
+
+Giving the environmental case an outcome of its own — so that `ASSERTED NOTHING` and `VACUOUS` stop
+being two vocabularies for one idea — is a v0.2.0 question, not a defect in this release.
 
 So read the counts each check prints, not just the tag. `no-pan` printing `scanning … — 0 file(s)` is a
 different fact from `31 file(s)`, and only the second means your corpus was examined.

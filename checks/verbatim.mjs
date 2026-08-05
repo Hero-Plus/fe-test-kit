@@ -1,24 +1,31 @@
 #!/usr/bin/env node
-// checks/verbatim.mjs — asserts no captured body was hand-edited or dropped. A
-// captured body is a wire record, so an edited value is a claim the backend never made — and it
-// compiles clean and passes every test that reads it.
+// checks/verbatim.mjs — asserts no captured body was hand-edited or dropped. A captured body is a
+// wire record, so an edited value is a claim the backend never made — and it compiles clean and
+// passes every test that reads it.
 //
-// Bodies are keyed by basename so the comparison survives a directory restructure: the body is the
-// same wire record wherever the tree puts it, and where it sits is `origin-set.mjs`'s question.
+// Keyed by basename, so the comparison survives a directory restructure: where a body sits is
+// `origin-set.mjs`'s question, not this one's.
 //
-// Pre-commit guard: once the change is committed this compares HEAD with itself and has nothing left
-// to assert, though it still exits 0. `cell-map.mjs` is the durable guard.
-//
-// Usage: no options; runs from hp-fixtures-verify
-// Exit codes: 0 pass, 1 a captured body was altered or removed, 2 setup error.
+// Both sides are absolute paths handed to the host's `readBody`. A repo-relative contract would let
+// a host resolve both against the working tree, comparing a file with itself and passing.
 import { AssertionError, deepStrictEqual } from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
-import { headContent, headPaths, listBodies } from '../lib/cells.mjs';
-import { absolute, FIXTURES_RELATIVE } from '../config.mjs';
+import { headPaths, isBody, listBodies, originOf } from '../lib/cells.mjs';
+import { finish, setupError } from '../lib/outcomes.mjs';
+import {
+  absolute,
+  CAPTURED_ORIGIN,
+  FIXTURES_RELATIVE,
+  readBody,
+  REPO_ROOT,
+} from '../config.mjs';
 
-// Values, not bytes: `scrub.mjs` runs prettier over everything it emits, so formatting is
-// machine-owned and a reflow is not an edit to the wire record.
+const CHECK = 'verbatim';
+
 const deepEq = (a, b) => {
   try {
     deepStrictEqual(a, b);
@@ -34,17 +41,14 @@ const collect = (entries, side) => {
   const collisions = [];
   for (const entry of entries) {
     const seen = map.get(entry.basename);
-    if (seen)
-      collisions.push(`${side}: ${seen.relative} and ${entry.relative}`);
+    if (seen) collisions.push(`${side}: ${seen.relative} and ${entry.relative}`);
     else map.set(entry.basename, entry);
   }
   return { map, collisions };
 };
 
 const live = collect(
-  listBodies().filter(
-    body => body.origin === 'captured' && body.relative.endsWith('.json')
-  ),
+  listBodies().filter(body => body.origin === CAPTURED_ORIGIN),
   'working tree'
 );
 
@@ -52,21 +56,16 @@ let headListing;
 try {
   headListing = headPaths();
 } catch (err) {
-  console.error(
-    'verbatim: could not read the HEAD corpus —',
-    String(err.stderr ?? err).slice(0, 300)
+  setupError(
+    CHECK,
+    `could not read the HEAD corpus — ${String(err.stderr ?? err).slice(0, 300)}`
   );
-  process.exit(2);
 }
 
-// Root-level JSON is excluded because it is not a body — a stray one there is what `origin-set.mjs`'s
-// root allowlist refuses, and counting it here would read as a body that went missing.
 const head = collect(
   headListing
     .filter(
-      relative =>
-        relative.endsWith('.json') &&
-        relative.slice(`${FIXTURES_RELATIVE}/`.length).includes('/')
+      relative => isBody(relative) && originOf(relative) === CAPTURED_ORIGIN
     )
     .map(relative => ({
       relative,
@@ -76,29 +75,55 @@ const head = collect(
 );
 
 console.log(
-  `verbatim: ${live.map.size} captured bodies · HEAD: ${head.map.size}`
+  `${CHECK}: ${live.map.size} captured bodies · HEAD: ${head.map.size}`
 );
 
-if (live.map.size === 0) {
-  console.error(
-    `\nverbatim: no captured body found under ${FIXTURES_RELATIVE}. Nothing was compared.`
-  );
-  process.exit(2);
-}
-
 const collisions = [...live.collisions, ...head.collisions];
-if (collisions.length) {
-  console.error(
-    `\nverbatim: ${collisions.length} body basename(s) are not unique, so bodies cannot be paired:`
+if (collisions.length)
+  setupError(
+    CHECK,
+    `${collisions.length} body basename(s) are not unique, so bodies cannot be paired:\n` +
+      collisions.map(c => `  ${c}`).join('\n')
   );
-  for (const c of collisions) console.error(`  ${c}`);
-  process.exit(2);
+
+// Guarded ahead of the extraction, not only for the outcome: `git ls-tree` reports a path absent from
+// HEAD as empty output and exit 0, where `git archive` reports it as a fatal pathspec error.
+if (head.map.size === 0)
+  finish({
+    check: CHECK,
+    assertedCount: 0,
+    assertedUnit: 'captured bodies compared against HEAD',
+    vacuousReason:
+      `HEAD carries no captured body under ${FIXTURES_RELATIVE}, so nothing could be compared.\n` +
+      '  Normal while a corpus is being built or restructured and not yet committed; permanent only\n' +
+      '  if this repo commits no captured body at all, in which case drop the check from CHECKS.',
+  });
+
+// Extracted whole rather than file by file, so a body's relative imports still resolve when the
+// host's readBody imports it as a module.
+const headDir = mkdtempSync(path.join(tmpdir(), 'hp-fixtures-head-'));
+process.on('exit', () => rmSync(headDir, { recursive: true, force: true }));
+try {
+  const tarball = path.join(headDir, 'head-corpus.tar');
+  execFileSync(
+    'git',
+    ['archive', '--format=tar', '-o', tarball, 'HEAD', '--', FIXTURES_RELATIVE],
+    { cwd: REPO_ROOT, stdio: ['ignore', 'ignore', 'pipe'] }
+  );
+  execFileSync('tar', ['-x', '-f', tarball, '-C', headDir], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+} catch (err) {
+  setupError(
+    CHECK,
+    `could not extract the HEAD corpus — ${String(err.stderr ?? err).slice(0, 300)}`
+  );
 }
 
 const altered = [];
 const removed = [];
 const added = [];
-let identicalBytes = 0;
+let compared = 0;
 
 for (const [basename, before] of head.map) {
   const now = live.map.get(basename);
@@ -109,91 +134,52 @@ for (const [basename, before] of head.map) {
   let wasValue;
   let isValue;
   try {
-    // Text rather than through `readJson`, because the bytes answer a second question the parsed
-    // values cannot: whether this run had anything to compare at all.
-    const wasText = headContent(before.relative);
-    const nowText = readFileSync(absolute(now.relative), 'utf8');
-    if (wasText === nowText) identicalBytes += 1;
-    wasValue = JSON.parse(wasText);
-    isValue = JSON.parse(nowText);
+    wasValue = await readBody(path.join(headDir, before.relative));
+    isValue = await readBody(absolute(now.relative));
   } catch (err) {
-    console.error(`verbatim: could not read ${basename} — ${err.message}`);
-    process.exit(2);
+    setupError(CHECK, `could not read ${basename} — ${err.message}`);
   }
+  // `undefined` on both sides deep-equals, so an edited body would compare clean and still be
+  // counted — a green PASS over a non-zero count, which the uniform vacuity rule cannot see, because
+  // the count is of comparisons attempted rather than of values read.
+  if (wasValue === undefined || isValue === undefined)
+    setupError(
+      CHECK,
+      `this repo's readBody returned undefined for ${basename}, so there was no value to compare.\n` +
+        '  A body module with no default export reads this way, on both sides at once — check what\n' +
+        '  readBody takes off the module it imports.'
+    );
+  compared += 1;
   if (!deepEq(wasValue, isValue)) altered.push({ before, now });
 }
 for (const [basename, body] of live.map) {
   if (!head.map.has(basename)) added.push(body);
 }
 
-console.log(`  altered vs HEAD: ${altered.length}`);
-console.log(`  no longer present under captured/: ${removed.length}`);
+console.log(`  compared against HEAD: ${compared}`);
+console.log(`  no longer present under ${CAPTURED_ORIGIN}/: ${removed.length}`);
 console.log(`  new since HEAD: ${added.length}`);
 
-// Terminal's half A — proving a new body byte-matches the capture it came from — has no analogue
-// here. `fetch.mjs` writes the raw wire and `scrub.mjs` derives the committed body from it, so a
-// captured body never equals its capture; all 19 carry scrub placeholders. That capture-to-emit
-// integrity is asserted where the raw capture actually exists, in `scrub.mjs`'s
-// `assertOnlyClassifiedFieldsChanged` (`:322`) and `assertNoScrubbedValueSurvives` (`:394`).
+// Reported, never adjudicated: nothing this check can see proves a new body was captured rather than
+// written. That is `capture-provenance`'s question, and answering it needs the raw captures.
 if (added.length) {
-  console.log(
-    '\n  New bodies are reported, not adjudicated — nothing here can prove one was captured\n' +
-      '  rather than written. Their integrity is asserted by the recapture itself:'
-  );
+  console.log('\n  new bodies, not adjudicated here:');
   for (const b of added) console.log(`    ${b.relative}`);
 }
 
-let failed = false;
-
-if (altered.length) {
-  failed = true;
-  console.error(
-    `\nFAIL — ${altered.length} captured body(ies) changed value vs HEAD:`
-  );
-  for (const a of altered) console.error(`  ${a.now.relative}`);
-  console.error(
-    '\n  A captured body changes only by recapture. Restore it from HEAD, or re-run the capture so\n' +
-      '  the new values arrive with the provenance that makes them a wire record.'
-  );
-}
-if (removed.length) {
-  failed = true;
-  console.error(
-    `\nFAIL — ${removed.length} captured body(ies) at HEAD are no longer under captured/:`
-  );
-  for (const r of removed) console.error(`  ${r.relative}`);
-  // There is no acceptance flag, unlike the recapture's own `--accept-removals`, because this check
-  // is spawned with no arguments. A removal the operator already authorised there still shows up
-  // here once, naming the body — then clears itself, since after the commit HEAD no longer holds it.
-  console.error(
-    '\n  If the removal was deliberate and already accepted by the recapture, this is the last\n' +
-      '  place the departing wire record is named: commit it, and the comparison goes quiet.'
-  );
-}
-
-if (failed) process.exit(1);
-
-// Byte-identity on every pair, with nothing added or removed, is the one state in which the value
-// comparison could not have failed — a reflow-only difference still gives it something to bite on.
-const comparedNothing =
-  removed.length === 0 &&
-  added.length === 0 &&
-  identicalBytes === head.map.size;
-
-if (comparedNothing) {
-  console.log(
-    '\n  ASSERTED NOTHING — every captured body is byte-identical to HEAD and no body was added or\n' +
-      '  removed, so this run compared the HEAD corpus with itself. A fresh checkout has no other\n' +
-      '  state available: this check is a pre-commit guard, and there is no CI position where it can\n' +
-      '  go red only for a real reason — against a merge base it reds for the whole life of a\n' +
-      '  legitimate recapture branch, and after a recapture it reds on `balance` alone. What holds\n' +
-      '  the same ground durably: cell-map.mjs pins each cell to its body path and purchase id, and\n' +
-      '  `report.mjs --check` is the calibrated post-recapture drift gate.'
-  );
-}
-
-console.log(
-  comparedNothing
-    ? '\nPASS — nothing to compare: the captured corpus is HEAD’s byte for byte'
-    : '\nPASS — no captured body was altered or removed'
-);
+finish({
+  check: CHECK,
+  assertedCount: compared,
+  assertedUnit: 'captured bodies compared against HEAD',
+  failures: [
+    ...altered.map(a => `${a.now.relative}: value differs from HEAD`),
+    ...removed.map(
+      r => `${r.relative}: at HEAD, no longer under ${CAPTURED_ORIGIN}/`
+    ),
+  ],
+  remediation:
+    '  A captured body changes only by recapture. Restore it from HEAD, or re-run the capture so the\n' +
+    '  new values arrive with the provenance that makes them a wire record.\n' +
+    '  A removal already accepted elsewhere is named here once, then goes quiet after the commit.',
+  pass: 'no captured body was altered or removed',
+});

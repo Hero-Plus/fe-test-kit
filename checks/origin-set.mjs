@@ -1,18 +1,20 @@
 #!/usr/bin/env node
-// checks/origin-set.mjs — asserts no body silently changed origin. A body's directory
-// is its whole origin classification, so a captured body moved into `authored/` compiles clean,
-// passes every test, and turns a pinned wire record into a hand-written one with no other signal.
+// checks/origin-set.mjs — asserts no body silently changed origin. A body's directory is its whole
+// origin classification, so a captured body moved into `authored/` compiles clean, passes every test,
+// and turns a pinned wire record into a hand-written one with no other signal.
 //
-// Two halves on opposite sides of durability, and reading them as one is how a CI job ends up
-// trusted for something it never checked. The bucket comparison is working tree vs HEAD, so once
-// committed it has nothing left to compare — while still exiting 0 — and `cell-map.mjs` is the durable
-// guard for it. The corpus-root allowlist reads only the filesystem and keeps asserting forever.
+// Two halves on opposite sides of durability, and reading them as one is how a CI job ends up trusted
+// for something it never checked. The bucket comparison is working tree vs HEAD, so it asserts only
+// while HEAD carries bodies to compare against — that is what the count below counts. The corpus-root
+// allowlist reads only the filesystem, keeps asserting forever, and is deliberately not counted: a
+// count the allowlist props up can never reach zero, and a vacuity signal that can never fire is not
+// one.
 //
 // Usage: no options; runs from hp-fixtures-verify
-// Exit codes: 0 pass, 1 a body changed bucket or an unclassified path appeared, 2 setup error.
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 
 import { headPaths, isBody, listBodies, originOf } from '../lib/cells.mjs';
+import { finish, setupError } from '../lib/outcomes.mjs';
 import {
   CORPUS_ROOT_FILES,
   CORPUS_ROOT_SUFFIXES,
@@ -21,9 +23,9 @@ import {
   ORIGIN_RELATIVE,
 } from '../config.mjs';
 
-const ROOT_DIRS = ORIGIN_RELATIVE.map(dir =>
-  dir.slice(dir.lastIndexOf('/') + 1)
-);
+const CHECK = 'origin-set';
+
+const ROOT_DIRS = ORIGIN_RELATIVE.map(dir => dir.slice(dir.lastIndexOf('/') + 1));
 
 // Asserted rather than only documented: a corpus-root path is either a body that belongs in an
 // origin directory or infrastructure that belongs on the allowlist, and letting one through unnamed
@@ -31,6 +33,52 @@ const ROOT_DIRS = ORIGIN_RELATIVE.map(dir =>
 const rootAllowed = name =>
   CORPUS_ROOT_FILES.includes(name) ||
   CORPUS_ROOT_SUFFIXES.some(s => name.endsWith(s));
+
+// An origin directory outside the corpus root would make the root walk below blind to it, so the
+// bucket half would report on a tree the allowlist half never sees.
+const strayOrigins = ORIGIN_RELATIVE.filter(
+  dir => !dir.startsWith(`${FIXTURES_RELATIVE}/`)
+);
+if (strayOrigins.length)
+  setupError(
+    CHECK,
+    `ORIGIN_RELATIVE holds ${strayOrigins.length} directory(ies) outside ${FIXTURES_RELATIVE}: ${strayOrigins.join(', ')}.`
+  );
+
+const ASSERTED_UNIT = 'body origins compared against HEAD';
+const REMEDIATION =
+  '  A captured body is a wire record and an authored one is an argument, so a bucket change changes\n' +
+  '  what the body proves. Move it back, or make the reclassification the commit. A path at the\n' +
+  "  corpus root belongs in an origin directory or on this check's root allowlist, so that adding it\n" +
+  '  is a decision rather than an omission.';
+
+// Vacuous rather than a setup error: `no-pan` reads the same absent corpus as vacuous, and exit 2 is
+// the one outcome `onVacuous` cannot soften — so erroring here would deny a repo adopting this check
+// before its corpus lands any way to say that the emptiness is its normal state.
+if (!existsSync(FIXTURES_DIR))
+  finish({
+    check: CHECK,
+    assertedCount: 0,
+    assertedUnit: ASSERTED_UNIT,
+    vacuousReason:
+      `${FIXTURES_RELATIVE} does not exist in this repo, so nothing could be classified.\n` +
+      '  Normal in a repo that adopted this check before it carries a corpus; otherwise\n' +
+      '  HP_FIXTURES_CONFIG points at a tree that does not hold one.',
+  });
+
+// Collected ahead of the vacuity branch below and passed into every finish(), which weighs failures
+// before the count: this half reads only the filesystem, so it still holds when there is nothing to
+// compare, and an `onVacuous: 'warn'` host would otherwise stop seeing a stray root file the moment
+// its corpus emptied.
+const failures = [];
+for (const entry of readdirSync(FIXTURES_DIR, { withFileTypes: true })) {
+  if (entry.isDirectory()) {
+    if (!ROOT_DIRS.includes(entry.name))
+      failures.push(`${entry.name}/ — unlisted directory at the corpus root`);
+  } else if (!rootAllowed(entry.name)) {
+    failures.push(`${entry.name} — unlisted file at the corpus root`);
+  }
+}
 
 // Keyed by basename, not path: the path is the thing under test, so a moved body must still look
 // like the same body on both sides — keyed by path, a bucket change reads as one body vanishing and
@@ -52,11 +100,10 @@ let headListing;
 try {
   headListing = headPaths();
 } catch (err) {
-  console.error(
-    'origin-set: could not read the HEAD corpus —',
-    String(err.stderr ?? err).slice(0, 300)
+  setupError(
+    CHECK,
+    `could not read the HEAD corpus — ${String(err.stderr ?? err).slice(0, 300)}`
   );
-  process.exit(2);
 }
 
 const head = keyByBasename(
@@ -73,38 +120,46 @@ for (const body of live.map.values())
   byOrigin[body.origin] = (byOrigin[body.origin] ?? 0) + 1;
 
 console.log(
-  `origin-set: ${live.map.size} classified bodies in ${FIXTURES_RELATIVE} · HEAD: ${head.map.size}`
+  `${CHECK}: ${live.map.size} classified bodies in ${FIXTURES_RELATIVE} · HEAD: ${head.map.size}`
 );
 console.log(`  by origin: ${JSON.stringify(byOrigin)}`);
 
-// Mid-restructure or mis-pointed, an empty origin tree would otherwise report a confident PASS
-// having classified nothing.
-if (live.map.size === 0) {
-  console.error(
-    `\norigin-set: no classified body found under ${ORIGIN_RELATIVE.join(', ')}.`
-  );
-  process.exit(2);
-}
+// An empty origin tree would otherwise report a confident PASS having classified nothing.
+if (live.map.size === 0)
+  finish({
+    check: CHECK,
+    assertedCount: 0,
+    assertedUnit: ASSERTED_UNIT,
+    failures,
+    remediation: REMEDIATION,
+    vacuousReason:
+      `No classified body was found under ${ORIGIN_RELATIVE.join(', ')}, so no origin could be\n` +
+      '  compared. Normal mid-restructure, or in a repo that adopted this check before its corpus\n' +
+      '  landed.',
+  });
 
 // An ambiguity in the keying is a setup error rather than a finding: two same-named bodies in
 // different buckets make a move between those buckets invisible.
 const collisions = [...live.collisions, ...head.collisions];
-if (collisions.length) {
-  console.error(
-    `\norigin-set: ${collisions.length} body basename(s) are not unique, so origin cannot be tracked:`
+if (collisions.length)
+  setupError(
+    CHECK,
+    `${collisions.length} body basename(s) are not unique, so origin cannot be tracked:\n` +
+      collisions.map(c => `  ${c}`).join('\n')
   );
-  for (const c of collisions) console.error(`  ${c}`);
-  process.exit(2);
-}
 
-const failures = [];
 const entered = [];
 const left = [];
+let compared = 0;
 
 for (const [basename, body] of live.map) {
   const before = head.map.get(basename);
-  if (!before) entered.push(body);
-  else if (before.origin !== body.origin)
+  if (!before) {
+    entered.push(body);
+    continue;
+  }
+  compared += 1;
+  if (before.origin !== body.origin)
     failures.push(
       `${basename}: ${before.origin} → ${body.origin}  (${before.relative} → ${body.relative})`
     );
@@ -113,26 +168,7 @@ for (const [basename, body] of head.map) {
   if (!live.map.has(basename)) left.push(body);
 }
 
-// Path sets, not the three tallies above: those also all read zero for a body moved within one
-// bucket, which is a real difference this check correctly ignores rather than a failure to compare.
-const relativesOf = side =>
-  new Set([...side.map.values()].map(b => b.relative));
-const liveRelatives = relativesOf(live);
-const headRelatives = relativesOf(head);
-const comparedNothing =
-  liveRelatives.size === headRelatives.size &&
-  [...liveRelatives].every(relative => headRelatives.has(relative));
-
-const rootStrays = [];
-for (const entry of readdirSync(FIXTURES_DIR, { withFileTypes: true })) {
-  if (entry.isDirectory()) {
-    if (!ROOT_DIRS.includes(entry.name))
-      rootStrays.push(`${entry.name}/ — unlisted directory at the corpus root`);
-  } else if (!rootAllowed(entry.name)) {
-    rootStrays.push(`${entry.name} — unlisted file at the corpus root`);
-  }
-}
-
+console.log(`  origins compared against HEAD: ${compared}`);
 console.log(`  bodies newly classified: ${entered.length}`);
 for (const b of entered) console.log(`    + ${b.origin}  ${b.relative}`);
 console.log(`  bodies no longer classified: ${left.length}`);
@@ -141,40 +177,14 @@ console.log(
   `  corpus root allowlist: ${CORPUS_ROOT_FILES.length} names, ${CORPUS_ROOT_SUFFIXES.join(' ')}, ${ROOT_DIRS.map(d => `${d}/`).join(' ')}`
 );
 
-if (comparedNothing) {
-  console.log(
-    '\n  ASSERTED NOTHING (bucket comparison) — the origin tree is HEAD’s path for path, so no\n' +
-      '  body could have entered, left or changed bucket. A fresh checkout has no other state\n' +
-      '  available, which makes this half a pre-commit guard; after the commit a bucket change is\n' +
-      '  cell-map.mjs’s to catch, through the source path it pins for every cell.\n' +
-      '  Still asserted, and neither reads git: the corpus-root allowlist, and that the origin tree\n' +
-      '  is non-empty.'
-  );
-}
-
-if (rootStrays.length) {
-  console.error(
-    `\nFAIL — ${rootStrays.length} corpus-root path(s) outside the origin tree and unlisted:`
-  );
-  for (const s of rootStrays) console.error(`  ${s}`);
-  console.error(
-    '\n  A wire body belongs in captured/, authored/ or derived/. Anything else belongs on this\n' +
-      "  check's root allowlist, so that adding it is a decision rather than an omission."
-  );
-}
-
-if (failures.length) {
-  console.error(`\nFAIL — ${failures.length} body(ies) changed origin bucket:`);
-  for (const f of failures) console.error(`  ${f}`);
-  console.error(
-    '\n  A captured body is a wire record and an authored one is an argument, so a bucket change\n' +
-      '  changes what the body proves. Move it back, or make the reclassification the commit.'
-  );
-}
-
-if (failures.length || rootStrays.length) process.exit(1);
-console.log(
-  comparedNothing
-    ? '\nPASS — the corpus root is fully accounted for (bucket comparison: nothing to compare)'
-    : '\nPASS — no body changed origin bucket, and the corpus root is fully accounted for'
-);
+finish({
+  check: CHECK,
+  assertedCount: compared,
+  assertedUnit: ASSERTED_UNIT,
+  failures,
+  remediation: REMEDIATION,
+  vacuousReason:
+    'No body in the working tree is also at HEAD, so no origin could be compared. Normal while a\n' +
+    '  corpus is being built or restructured and not yet committed.',
+  pass: 'no body changed origin bucket, and the corpus root is fully accounted for',
+});

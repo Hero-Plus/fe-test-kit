@@ -6,23 +6,50 @@ import path from 'node:path';
 import { after, describe, test } from 'node:test';
 
 import {
+  CHECK_CONFIG_NAMES,
   CONFIG_NAMES,
   CONFIG_VAR,
+  CORE_CONFIG_NAMES,
   HostConfigError,
   loadHostConfig,
+  requiredNamesFor,
+  validateChecks,
 } from './lib/host-config.mjs';
 
 const scratch = mkdtempSync(path.join(tmpdir(), 'hp-fixtures-config-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
-// Generated from CONFIG_NAMES rather than written out, so the fixture cannot drift from the list it
-// is meant to satisfy and leave the assertion below passing against a stale pair.
-const hostModule = (names, value = name => `'${name}'`) => {
+const EVERY_CHECK = Object.keys(CHECK_CONFIG_NAMES).map(name => ({
+  name,
+  kit: `checks/${name}.mjs`,
+}));
+
+// Only the names carrying a shape are spelled out; the rest are their own name as a string, so the
+// fixture cannot drift from the list it is meant to satisfy.
+const SHAPED = {
+  absolute: 'relative => relative',
+  CORPUS_ROOT_FILES: '[]',
+  CORPUS_ROOT_SUFFIXES: '[]',
+  ORIGIN_RELATIVE: '[]',
+  enumerateCells: 'async () => ({})',
+  readBody: 'async () => ({})',
+  listCaptures: 'async () => []',
+  SCRIPTS: '{}',
+};
+
+const hostModule = (names, { checks = EVERY_CHECK, override = {} } = {}) => {
   const file = path.join(scratch, `host-${names.length}-${Math.random()}.mjs`);
-  writeFileSync(
-    file,
-    `${names.map(name => `export const ${name} = ${value(name)};`).join('\n')}\n`
-  );
+  const source = names
+    .map(name => {
+      const value =
+        override[name] ??
+        (name === 'CHECKS'
+          ? JSON.stringify(checks)
+          : (SHAPED[name] ?? `'${name}'`));
+      return `export const ${name} = ${value};`;
+    })
+    .join('\n');
+  writeFileSync(file, `${source}\n`);
   return file;
 };
 
@@ -41,7 +68,153 @@ describe('the config contract', () => {
   });
 
   test('every re-exported name carries the host value', () => {
-    for (const name of CONFIG_NAMES) assert.equal(config[name], name);
+    for (const name of CONFIG_NAMES.filter(n => !(n in SHAPED)))
+      if (name !== 'CHECKS') assert.equal(config[name], name);
+    assert.equal(typeof config.absolute, 'function');
+    assert.equal(config.CHECKS.length, EVERY_CHECK.length);
+  });
+
+  test('every per-check name is reachable from CONFIG_NAMES', () => {
+    for (const names of Object.values(CHECK_CONFIG_NAMES))
+      for (const name of names) assert.ok(CONFIG_NAMES.includes(name));
+  });
+});
+
+describe('per-check requirements', () => {
+  test('a two-check host boots without the other checks’ names', async () => {
+    const checks = [
+      { name: 'no-pan', kit: 'checks/no-pan.mjs', required: true },
+      { name: 'origin-set', kit: 'checks/origin-set.mjs' },
+    ];
+    const needed = requiredNamesFor(checks);
+    process.env[CONFIG_VAR] = hostModule(needed, { checks });
+
+    const host = await loadHostConfig();
+
+    assert.equal(host.PAN_ALLOWLIST, 'PAN_ALLOWLIST');
+    for (const absent of [
+      'CELL_MANIFEST',
+      'TRANSACTION_TABLES',
+      'enumerateCells',
+      'readBody',
+      'listCaptures',
+    ])
+      assert.equal(host[absent], undefined);
+  });
+
+  test('a name the enabled checks read is listed when missing', async () => {
+    const checks = [{ name: 'cell-map', kit: 'checks/cell-map.mjs' }];
+    const needed = requiredNamesFor(checks).filter(
+      name => name !== 'CELL_MANIFEST'
+    );
+    process.env[CONFIG_VAR] = hostModule(needed, { checks });
+
+    await assert.rejects(loadHostConfig(), err => {
+      assert.ok(err instanceof HostConfigError);
+      assert.match(err.message, /CELL_MANIFEST/);
+      return true;
+    });
+  });
+
+  test('a name no enabled check reads is not required', () => {
+    assert.ok(!requiredNamesFor([]).includes('CELL_MANIFEST'));
+    assert.deepEqual(requiredNamesFor([]), [...CORE_CONFIG_NAMES].sort());
+  });
+
+  test('requirements key off the kit file, not the host’s name for it', () => {
+    const renamed = [{ name: 'pan', kit: 'checks/no-pan.mjs' }];
+    assert.ok(requiredNamesFor(renamed).includes('PAN_ALLOWLIST'));
+  });
+
+  test('a host: entry pulls in no kit config names', () => {
+    const hostOwned = [{ name: 'no-pan', host: 'tools/checks/no-pan.mjs' }];
+    assert.deepEqual(requiredNamesFor(hostOwned), [...CORE_CONFIG_NAMES].sort());
+  });
+
+  test('SCRIPTS is optional', async () => {
+    const checks = [{ name: 'no-pan', kit: 'checks/no-pan.mjs' }];
+    const needed = requiredNamesFor(checks);
+    assert.ok(!needed.includes('SCRIPTS'));
+    process.env[CONFIG_VAR] = hostModule(needed, { checks });
+    const host = await loadHostConfig();
+    assert.equal(host.SCRIPTS, undefined);
+  });
+});
+
+describe('a wrong-shaped export', () => {
+  for (const [name, wrong] of [
+    ['absolute', `'not-a-function'`],
+    ['enumerateCells', `'not-a-function'`],
+    ['readBody', '42'],
+    ['listCaptures', 'null'],
+    ['ORIGIN_RELATIVE', `'a-string-not-an-array'`],
+    ['CORPUS_ROOT_FILES', '[1, 2]'],
+    ['SCRIPTS', '[]'],
+  ])
+    test(`${name} is refused, not deferred to a TypeError mid-check`, async () => {
+      process.env[CONFIG_VAR] = hostModule([...CONFIG_NAMES], {
+        override: { [name]: wrong },
+      });
+      await assert.rejects(loadHostConfig(), err => {
+        assert.ok(err instanceof HostConfigError);
+        assert.match(err.message, new RegExp(name));
+        return true;
+      });
+    });
+
+  test('CHECKS that is not an array names itself', async () => {
+    process.env[CONFIG_VAR] = hostModule([...CONFIG_NAMES], {
+      override: { CHECKS: `'no-pan'` },
+    });
+    await assert.rejects(loadHostConfig(), err => {
+      assert.match(err.message, /CHECKS/);
+      return true;
+    });
+  });
+});
+
+describe('a malformed CHECKS entry', () => {
+  for (const [why, entry] of [
+    ['no name', { kit: 'checks/no-pan.mjs' }],
+    ['neither kit nor host', { name: 'x' }],
+    ['both kit and host', { name: 'x', kit: 'a.mjs', host: 'b.mjs' }],
+    ['an unknown onVacuous', { name: 'x', kit: 'a.mjs', onVacuous: 'ignore' }],
+    ['a non-boolean required', { name: 'x', kit: 'a.mjs', required: 'yes' }],
+    ['not an object', 'checks/no-pan.mjs'],
+  ])
+    test(`${why} is reported by index`, () => {
+      const problems = validateChecks([entry]);
+      assert.equal(problems.length, 1);
+      assert.match(problems[0], /^CHECKS\[0\]/);
+    });
+
+  test('a duplicate name is reported', () => {
+    const problems = validateChecks([
+      { name: 'x', kit: 'a.mjs' },
+      { name: 'x', kit: 'b.mjs' },
+    ]);
+    assert.equal(problems.length, 1);
+    assert.match(problems[0], /already used/);
+  });
+
+  // A host check never reports `vacuous`, so a policy declared on one is a decision that does
+  // nothing — refused rather than accepted and ignored.
+  test('onVacuous on a host: entry is refused', () => {
+    const problems = validateChecks([
+      { name: 'x', host: 'tools/x.mjs', onVacuous: 'warn' },
+    ]);
+    assert.equal(problems.length, 1);
+    assert.match(problems[0], /no effect on a `host:` check/);
+  });
+
+  test('a well-formed pair is accepted', () => {
+    assert.deepEqual(
+      validateChecks([
+        { name: 'no-pan', kit: 'checks/no-pan.mjs', required: true },
+        { name: 'local', host: 'tools/fixtures/checks/local.mjs' },
+      ]),
+      []
+    );
   });
 });
 
@@ -73,22 +246,22 @@ describe('an unusable host config', () => {
     assert.equal(host.REPO_ROOT, 'REPO_ROOT');
   });
 
-  test('missing names are listed, not silently undefined', async () => {
+  test('missing core names are listed, not silently undefined', async () => {
     const withoutTwo = CONFIG_NAMES.filter(
-      name => name !== 'CELL_MANIFEST' && name !== 'REPO_ROOT'
+      name => name !== 'FIXTURES_DIR' && name !== 'REPO_ROOT'
     );
     process.env[CONFIG_VAR] = hostModule(withoutTwo);
     await assert.rejects(loadHostConfig(), err => {
       assert.ok(err instanceof HostConfigError);
-      assert.match(err.message, /CELL_MANIFEST, REPO_ROOT/);
+      assert.match(err.message, /FIXTURES_DIR, REPO_ROOT/);
       return true;
     });
   });
 
   test('a name exported as undefined counts as missing', async () => {
-    process.env[CONFIG_VAR] = hostModule([...CONFIG_NAMES], name =>
-      name === 'FIXTURES_DIR' ? 'undefined' : `'${name}'`
-    );
+    process.env[CONFIG_VAR] = hostModule([...CONFIG_NAMES], {
+      override: { FIXTURES_DIR: 'undefined' },
+    });
     await assert.rejects(loadHostConfig(), err => {
       assert.match(err.message, /FIXTURES_DIR/);
       return true;

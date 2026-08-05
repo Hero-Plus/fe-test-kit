@@ -13,19 +13,19 @@
 // Durable after commit: it reads only the working tree, invokes no git and pins against no HEAD.
 //
 // Usage: hp-fixtures-no-pan [--root <dir>]
-// Exit codes: 0 pass, 1 a card-number shape reached the corpus, 2 setup error, 3 the corpus root is
-// absent so nothing was scanned — which fails the run.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 
-import { VACUOUS } from '../lib/exit-codes.mjs';
 import { digitsOf, isPanRun, PAN_CANDIDATE_PATTERNS } from '../lib/luhn.mjs';
+import { finish, setupError } from '../lib/outcomes.mjs';
 import {
   FIXTURES_DIR,
   FIXTURES_RELATIVE,
   PAN_ALLOWLIST,
   PAN_ALLOWLIST_RELATIVE,
 } from '../config.mjs';
+
+const CHECK = 'no-pan';
 
 // The scan is scoped to the corpus rather than the tree: a whole-tree scan hits icon path data,
 // where an all-zero run is Luhn-valid at every length in the range, and third-party test card
@@ -42,17 +42,17 @@ function resolveRoot(argv) {
 const root = resolveRoot(process.argv.slice(2));
 const rootLabel = root === FIXTURES_DIR ? FIXTURES_RELATIVE : root;
 
-if (!existsSync(root)) {
-  console.error(
-    `\nno-pan: asserted nothing — ${rootLabel} does not exist in this repo.`
-  );
-  console.error(
-    '  Nothing to scan is not the same as nothing found, and this is a card-number scanner: a green\n' +
+if (!existsSync(root))
+  finish({
+    check: CHECK,
+    assertedCount: 0,
+    assertedUnit: 'corpus files scanned',
+    vacuousReason:
+      `${rootLabel} does not exist in this repo.\n` +
+      '  Nothing to scan is not the same as nothing found, and this is a card-number scanner: a green\n' +
       '  run over an absent tree is the one result it must never report. Point HP_FIXTURES_CONFIG at\n' +
-      '  the repo holding the corpus.'
-  );
-  process.exit(VACUOUS);
-}
+      '  the repo holding the corpus.',
+  });
 
 const unscannable = [];
 
@@ -74,29 +74,26 @@ if (existsSync(PAN_ALLOWLIST)) {
     // Refused here rather than left to throw on `.find` mid-walk, which surfaces as a crash instead
     // of the setup-error exit every other malformed allowlist takes.
     const allow = parsed.allow ?? [];
-    if (!Array.isArray(allow)) {
-      console.error(
-        `no-pan: ${PAN_ALLOWLIST_RELATIVE} has an "allow" that is not an array.`
+    if (!Array.isArray(allow))
+      setupError(
+        CHECK,
+        `${PAN_ALLOWLIST_RELATIVE} has an "allow" that is not an array.`
       );
-      process.exit(2);
-    }
     allowlist = allow;
   } catch (err) {
-    console.error(
-      `no-pan: ${PAN_ALLOWLIST_RELATIVE} is not valid JSON —`,
-      err.message
+    setupError(
+      CHECK,
+      `${PAN_ALLOWLIST_RELATIVE} is not valid JSON — ${err.message}`
     );
-    process.exit(2);
   }
   const malformed = allowlist.filter(e => !e?.path || !e?.digits || !e?.reason);
-  if (malformed.length) {
-    // A reason is what makes an entry auditable, so an entry without one is not a weaker entry —
-    // it is an undocumented suppression of a card-number match, which is the thing being guarded.
-    console.error(
-      `no-pan: ${malformed.length} allowlist entry(ies) missing path, digits or reason.`
+  // A reason is what makes an entry auditable, so an entry without one is not a weaker entry — it is
+  // an undocumented suppression of a card-number match, which is the thing being guarded.
+  if (malformed.length)
+    setupError(
+      CHECK,
+      `${malformed.length} allowlist entry(ies) missing path, digits or reason.`
     );
-    process.exit(2);
-  }
 }
 
 const isDir = statSync(root).isDirectory();
@@ -105,32 +102,28 @@ const files = isDir ? filesUnder(root) : [root];
 // path relative to itself is the empty string, and the hit would print with no file at all.
 const base = isDir ? root : path.dirname(root);
 
-console.log(`no-pan: scanning ${rootLabel} — ${files.length} file(s)`);
+console.log(`${CHECK}: scanning ${rootLabel} — ${files.length} file(s)`);
 console.log(
   `  allowlist ${PAN_ALLOWLIST_RELATIVE}: ${allowlist.length} entry(ies)`
 );
 
-// The corpus directory existing but holding nothing is a broken run, not a clean one: mid-restructure
-// or mis-pointed, this check would otherwise report a confident PASS having examined no bytes.
-if (files.length === 0) {
-  console.error(`\nno-pan: ${rootLabel} exists but holds no files to scan.`);
-  process.exit(2);
-}
+if (files.length === 0)
+  finish({
+    check: CHECK,
+    assertedCount: 0,
+    assertedUnit: 'corpus files scanned',
+    vacuousReason: `${rootLabel} exists but holds no file to scan.`,
+  });
 
-// The same failure in miniature, and quieter: a symlink's Dirent reports as neither file nor
-// directory, so an entry the walk cannot classify would drop out of the scan with nothing said and
-// the PASS below would cover bytes never read.
-if (unscannable.length > 0) {
-  console.error(
-    `\nno-pan: ${unscannable.length} entry(ies) under ${rootLabel} are neither a file nor a directory:`
+// A symlink's Dirent reports as neither file nor directory, so an entry the walk cannot classify
+// would drop out of the scan with nothing said, and the pass below would cover bytes never read.
+if (unscannable.length > 0)
+  setupError(
+    CHECK,
+    `${unscannable.length} entry(ies) under ${rootLabel} are neither a file nor a directory:\n` +
+      unscannable.map(entry => `  ${path.relative(base, entry)}`).join('\n') +
+      '\n  A symlink is the usual cause. Replace it with the real file or move it out of the corpus.'
   );
-  for (const entry of unscannable)
-    console.error(`  ${path.relative(base, entry)}`);
-  console.error(
-    '\n  A symlink is the usual cause. Replace it with the real file or move it out of the corpus.'
-  );
-  process.exit(2);
-}
 
 const hits = [];
 const allowed = [];
@@ -143,8 +136,7 @@ for (const file of files) {
   try {
     text = readFileSync(file, 'utf8');
   } catch (err) {
-    console.error(`no-pan: could not read ${relative} — ${err.message}`);
-    process.exit(2);
+    setupError(CHECK, `could not read ${relative} — ${err.message}`);
   }
   text.split('\n').forEach((line, index) => {
     // The patterns overlap: an unseparated run matches several, and the same number reported twice
@@ -191,17 +183,14 @@ if (unused.length) {
   for (const u of unused) console.log(`    ${u.path}  ${u.digits}`);
 }
 
-if (hits.length) {
-  console.error(
-    `\nFAIL — ${hits.length} card-number shape(s) with no allowlist entry:`
-  );
-  for (const h of hits) console.error(`  ${h.where}  ${h.run}`);
-  console.error(
-    '\n  Each is a card-number shape. Take the value out of the corpus, or — where it provably is\n' +
-      `  not a PAN — add {path, digits, reason} to ${PAN_ALLOWLIST_RELATIVE}.\n` +
-      '  Never resolve one by loosening the detector.'
-  );
-  process.exit(1);
-}
-
-console.log('\nPASS — no un-allowlisted card-number shape in the corpus');
+finish({
+  check: CHECK,
+  assertedCount: files.length,
+  assertedUnit: 'corpus files scanned',
+  failures: hits.map(h => `${h.where}  ${h.run}`),
+  remediation:
+    '  Each is a card-number shape. Take the value out of the corpus, or — where it provably is not a\n' +
+    `  PAN — add {path, digits, reason} to ${PAN_ALLOWLIST_RELATIVE}.\n` +
+    '  Never resolve one by loosening the detector.',
+  pass: 'no un-allowlisted card-number shape in the corpus',
+});

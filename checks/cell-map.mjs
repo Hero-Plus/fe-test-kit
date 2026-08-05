@@ -1,25 +1,31 @@
 #!/usr/bin/env node
-// checks/cell-map.mjs — asserts each pinned `(scenario, view)` cell still resolves to
-// the body and purchase it was built from. A cell re-pointed at a different purchase keeps a
-// verbatim-captured body and keeps tsc and jest clean, while every test on that scenario silently
-// asserts against the wrong transaction. The sibling checks miss it: they walk bodies, and neither
-// reads the registry that binds a scenario to one.
+// checks/cell-map.mjs — asserts each pinned `(scenario, view)` cell still resolves to the body and
+// id it was built from. A cell re-pointed at a different transaction keeps a verbatim-captured body
+// and keeps tsc and jest clean, while every test on that scenario silently asserts against the wrong
+// one. The sibling checks miss it: they walk bodies, and neither knows what binds a scenario to one.
 //
 // This is the one corpus check that survives its own commit. It pins against the cell manifest,
 // invokes no git and reads no HEAD, so it keeps asserting after the change is committed — where
-// `verbatim` and `origin-set` compare against HEAD and so have nothing left to compare once it is,
-// though they still exit 0.
+// `verbatim`, `origin-set` and `capture-provenance` compare against HEAD and have nothing left to.
+//
+// The corpus arrives as data from the host's `enumerateCells()`. `view` is whatever vocabulary that
+// host uses, so a repo with four views pins all four through the same engine as a repo with two.
 //
 // Usage: hp-fixtures-cell-map [--write] [--list]
-// Exit codes: 0 pass, 1 a cell moved or a count changed, 2 setup error, 3 no manifest pins the cells
-// so no binding was checked — which fails the run.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { enumerateCells, REGISTRY_RELATIVE } from '../lib/cells.mjs';
-import { VACUOUS } from '../lib/exit-codes.mjs';
-import { CELL_MANIFEST, CELL_MANIFEST_RELATIVE } from '../config.mjs';
+import { listBodies } from '../lib/cells.mjs';
+import { finish, setupError } from '../lib/outcomes.mjs';
+import {
+  CELL_MANIFEST,
+  CELL_MANIFEST_RELATIVE,
+  enumerateCells,
+  SCRIPTS,
+} from '../config.mjs';
+
+const CHECK = 'cell-map';
 
 // Derived from this file's location rather than named: each package manager lays `node_modules` out
 // differently, so no fixed path is right in every repo that installs this package.
@@ -28,6 +34,8 @@ const REWRITE_COMMAND = (() => {
   const fromCwd = path.relative(process.cwd(), self);
   return `node ${fromCwd.startsWith('..') ? self : fromCwd} --write`;
 })();
+const PIN_COMMAND = SCRIPTS?.pinCells ?? REWRITE_COMMAND;
+const LIST_COMMAND = SCRIPTS?.listCells ?? `${REWRITE_COMMAND} --list`;
 
 const sortedEntries = record =>
   Object.fromEntries(
@@ -36,11 +44,41 @@ const sortedEntries = record =>
 
 let live;
 try {
-  live = enumerateCells();
+  live = await enumerateCells();
 } catch (err) {
-  console.error(`cell-map: could not read the corpus — ${err.message}`);
-  process.exit(2);
+  // Names the host export rather than the corpus: the ancestor of this message blamed the corpus for
+  // what is almost always a config seam that never ran.
+  setupError(
+    CHECK,
+    `this repo's enumerateCells() threw — ${err.message}\n` +
+      "  It is the host's own corpus reader, named on HP_FIXTURES_CONFIG. The engine reads no host\n" +
+      '  source, so nothing here can resolve a cell without it.'
+  );
 }
+
+for (const field of [
+  'cells',
+  'aux',
+  'scenarios',
+  'views',
+  'ragged',
+  'duplicated',
+])
+  if (!Array.isArray(live?.[field]))
+    setupError(CHECK, `enumerateCells() returned no \`${field}\` array.`);
+
+// A view outside the host's own declared vocabulary means the two halves of its provider disagree,
+// and `--write` below would mint a manifest from the disagreement.
+const undeclared = [
+  ...new Set(
+    live.cells.map(cell => cell.view).filter(view => !live.views.includes(view))
+  ),
+];
+if (undeclared.length)
+  setupError(
+    CHECK,
+    `enumerateCells() reported cells in ${undeclared.length} view(s) it does not declare: ${undeclared.join(', ')}.`
+  );
 
 const byView = {};
 for (const cell of live.cells) byView[cell.view] = (byView[cell.view] ?? 0) + 1;
@@ -57,7 +95,7 @@ const observed = {
     Object.fromEntries(
       live.cells.map(cell => [
         `${cell.scenario}.${cell.view}`,
-        { source: cell.source, purchase: cell.purchase },
+        { source: cell.source, id: cell.id ?? null },
       ])
     )
   ),
@@ -65,63 +103,102 @@ const observed = {
     Object.fromEntries(
       live.aux.map(entry => [
         entry.name,
-        { source: entry.source, id: entry.id },
+        { source: entry.source, id: entry.id ?? null },
       ])
     )
   ),
 };
 
 console.log(
-  `cell-map: ${observed.counts.scenarios} scenarios · ${observed.counts.cells} filled cells · ${observed.counts.aux} aux bodies`
+  `${CHECK}: ${observed.counts.scenarios} scenarios · ${observed.counts.cells} filled cells · ${observed.counts.aux} aux bodies`
 );
 console.log(`  cells by view: ${JSON.stringify(observed.counts.byView)}`);
 console.log(
   `  scenarios with no list row: ${observed.ragged.length ? observed.ragged.join(', ') : 'none'}`
 );
 
-// A corpus that resolved no cell at all is a broken read, not a clean one — a registry this check
-// stopped being able to parse would otherwise report a confident PASS having asserted nothing.
-if (live.cells.length === 0) {
-  console.error(
-    `\ncell-map: resolved 0 cells from ${REGISTRY_RELATIVE}. Nothing was asserted.`
-  );
-  process.exit(2);
-}
+// A body the registry cannot resolve, and a body no registry entry names, are the same defect seen
+// from two sides, and both are silent: one `railed(`-style wrapper around a registry value drops
+// exactly one cell, leaves the rest resolving, and regenerates a manifest one body short. Failing
+// here is what stops that from being a clean-looking `--write`.
+const unresolved = [
+  ...live.cells
+    .filter(cell => !cell.source)
+    .map(
+      cell =>
+        `${cell.scenario}.${cell.view}: the registry value resolved to no file`
+    ),
+  ...live.aux
+    .filter(entry => !entry.source)
+    .map(entry => `aux.${entry.name}: the registry value resolved to no file`),
+];
+const named = new Set(
+  [...live.cells, ...live.aux].map(entry => entry.source).filter(Boolean)
+);
+const orphans = listBodies()
+  .filter(body => !named.has(body.relative))
+  .map(body => `${body.relative}: no cell and no aux entry names this body`);
+
+if (unresolved.length || orphans.length)
+  finish({
+    check: CHECK,
+    assertedCount: live.cells.length + live.aux.length,
+    assertedUnit: 'registry entries resolved',
+    failures: [...unresolved, ...orphans],
+    remediation:
+      '  Every body in an origin directory is reachable from the registry, and every registry entry\n' +
+      '  resolves to one. An unresolvable value is usually a wrapper call around it — resolution is by\n' +
+      '  object identity, and a call that returns a new object breaks it. A body no entry names has\n' +
+      '  either been dropped from the registry or never added to it.',
+  });
+
+if (live.cells.length + live.aux.length === 0)
+  finish({
+    check: CHECK,
+    assertedCount: 0,
+    assertedUnit: 'pinned bodies',
+    vacuousReason:
+      'enumerateCells() resolved no cell and no aux body, so there was nothing to pin.',
+  });
 
 if (live.duplicated.length) {
   console.log(
-    `\n  note: ${live.duplicated.length} purchase(s) appear on more than one captured list page:`
+    `\n  note: ${live.duplicated.length} id(s) appear on more than one captured list page:`
   );
-  for (const d of live.duplicated)
-    console.log(`    ${d.scenario}  ${d.purchase}`);
+  for (const d of live.duplicated) console.log(`    ${d.scenario}  ${d.id}`);
 }
 
+// Exits 0 having asserted nothing, and stays outside the outcome vocabulary deliberately: this is a
+// generator invocation, not a check run, and its product is reviewed through `--list` and the diff.
+// The guards above run first, so a corpus the host cannot fully resolve can never mint a manifest.
 if (process.argv.includes('--write')) {
   writeFileSync(CELL_MANIFEST, `${JSON.stringify(observed, null, 2)}\n`);
-  console.log(`\nwrote ${CELL_MANIFEST_RELATIVE} — ${live.cells.length} cells`);
+  console.log(
+    `\nwrote ${CELL_MANIFEST_RELATIVE} — ${live.cells.length} cells, ${live.aux.length} aux`
+  );
+  console.log(`  review it:  ${LIST_COMMAND}`);
   process.exit(0);
 }
 
-if (!existsSync(CELL_MANIFEST)) {
-  console.error(
-    `\ncell-map: asserted nothing — ${CELL_MANIFEST_RELATIVE} does not exist in this repo.`
-  );
-  console.error(
-    `  ${live.cells.length} cell(s) resolved but nothing pins them, so no binding was checked.\n` +
-      '  Generate and review the manifest:\n' +
-      `    ${REWRITE_COMMAND}`
-  );
-  process.exit(VACUOUS);
-}
+if (!existsSync(CELL_MANIFEST))
+  finish({
+    check: CHECK,
+    assertedCount: 0,
+    assertedUnit: 'pinned bodies',
+    vacuousReason:
+      `${CELL_MANIFEST_RELATIVE} does not exist in this repo, so nothing pins the ` +
+      `${live.cells.length + live.aux.length} resolved bodies.\n` +
+      `  Generate and review the manifest:  ${PIN_COMMAND}`,
+  });
 
 let pinned;
 try {
   pinned = JSON.parse(readFileSync(CELL_MANIFEST, 'utf8'));
 } catch (err) {
-  console.error(
-    `cell-map: ${CELL_MANIFEST_RELATIVE} is not valid JSON — ${err.message}`
+  setupError(
+    CHECK,
+    `${CELL_MANIFEST_RELATIVE} is not valid JSON — ${err.message}`
   );
-  process.exit(2);
 }
 
 const failures = [];
@@ -132,16 +209,13 @@ for (const [key, expected] of Object.entries(pinned.cells ?? {})) {
     failures.push(`${key}: pinned cell is no longer filled`);
     continue;
   }
-  if (actual.purchase !== expected.purchase)
-    failures.push(
-      `${key}: purchase ${actual.purchase} — pinned ${expected.purchase}`
-    );
+  if (actual.id !== expected.id)
+    failures.push(`${key}: id ${actual.id} — pinned ${expected.id}`);
   if (actual.source !== expected.source)
     failures.push(`${key}: body ${actual.source} — pinned ${expected.source}`);
 }
 for (const key of Object.keys(observed.cells)) {
-  if (!(key in (pinned.cells ?? {})))
-    failures.push(`${key}: cell is not pinned`);
+  if (!(key in (pinned.cells ?? {}))) failures.push(`${key}: cell is not pinned`);
 }
 
 for (const [name, expected] of Object.entries(pinned.aux ?? {})) {
@@ -158,8 +232,7 @@ for (const [name, expected] of Object.entries(pinned.aux ?? {})) {
     failures.push(`aux.${name}: id ${actual.id} — pinned ${expected.id}`);
 }
 for (const name of Object.keys(observed.aux)) {
-  if (!(name in (pinned.aux ?? {})))
-    failures.push(`aux.${name}: is not pinned`);
+  if (!(name in (pinned.aux ?? {}))) failures.push(`aux.${name}: is not pinned`);
 }
 
 for (const [name, value] of Object.entries(observed.counts)) {
@@ -174,36 +247,33 @@ for (const [name, value] of Object.entries(observed.counts)) {
     );
 }
 
-// The ragged set is the visible edge of this check re-deriving `corpus.ts`'s row lookup rather than
-// importing it. If that rule changes on one side only, the set moves and says so here.
 if (JSON.stringify(observed.ragged) !== JSON.stringify(pinned.ragged ?? []))
   failures.push(
     `scenarios with no list row: ${JSON.stringify(observed.ragged)} — pinned ${JSON.stringify(pinned.ragged ?? [])}`
   );
 
-console.log(
-  `  pinned cells asserted: ${Object.keys(pinned.cells ?? {}).length}  ·  pinned aux: ${Object.keys(pinned.aux ?? {}).length}`
-);
+const pinnedCells = Object.keys(pinned.cells ?? {}).length;
+const pinnedAux = Object.keys(pinned.aux ?? {}).length;
+console.log(`  pinned cells: ${pinnedCells}  ·  pinned aux: ${pinnedAux}`);
 
 if (process.argv.includes('--list')) {
   console.log('\nfull cell map:');
   for (const [key, cell] of Object.entries(observed.cells))
-    console.log(`  ${key} → ${cell.source} → ${cell.purchase}`);
+    console.log(`  ${key} → ${cell.source} → ${cell.id}`);
+  for (const [name, entry] of Object.entries(observed.aux))
+    console.log(`  aux.${name} → ${entry.source} → ${entry.id}`);
 }
 
-if (failures.length) {
-  console.error(
-    `\nFAIL — ${failures.length} problem(s) vs ${CELL_MANIFEST_RELATIVE}:`
-  );
-  for (const f of failures) console.error(`  ${f}`);
-  console.error(
-    '\n  A cell moved. Either the registry was re-pointed by mistake, or the move is intended and\n' +
-      '  the manifest is regenerated and reviewed in the same commit:\n' +
-      `    ${REWRITE_COMMAND}`
-  );
-  process.exit(1);
-}
-
-console.log(
-  '\nPASS — every pinned cell resolves to its expected body and purchase'
-);
+finish({
+  check: CHECK,
+  assertedCount: pinnedCells + pinnedAux,
+  assertedUnit: 'pinned bodies',
+  failures,
+  remediation:
+    '  A cell moved. Either the registry was re-pointed by mistake, or the move is intended and the\n' +
+    `  manifest is regenerated and reviewed in the same commit:  ${PIN_COMMAND}`,
+  vacuousReason:
+    `${CELL_MANIFEST_RELATIVE} pins no cell and no aux body, so no binding was checked.\n` +
+    `  Generate and review the manifest:  ${PIN_COMMAND}`,
+  pass: 'every pinned cell resolves to its expected body and id',
+});

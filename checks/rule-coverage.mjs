@@ -14,51 +14,48 @@
 // cited id the spec file does not carry is undecidable here: a real rule nobody adjudicated and a
 // mistyped one look identical. That is why the two citation classes below report and never fail.
 //
-// Exit codes: 0 pass, 1 an unbacked rule or a stale exemption, 2 setup error, 3 the spec is absent so
-// no claim was backed — which fails the run.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
+import { finish, setupError } from '../lib/outcomes.mjs';
 import {
   absolute,
   REPO_ROOT,
-  TOOLS_RELATIVE,
+  RULE_EXEMPTIONS_RELATIVE,
   TRANSACTION_TABLES,
   TRANSACTION_TABLES_RELATIVE,
 } from '../config.mjs';
-import { VACUOUS } from '../lib/exit-codes.mjs';
 
-const EXEMPTIONS_RELATIVE = `${TOOLS_RELATIVE}/rule-coverage-exemptions.json`;
-const EXEMPTIONS = absolute(EXEMPTIONS_RELATIVE);
+const CHECK = 'rule-coverage';
+const EXEMPTIONS = absolute(RULE_EXEMPTIONS_RELATIVE);
 
-if (!existsSync(TRANSACTION_TABLES)) {
-  console.error(
-    `\nrule-coverage: asserted nothing — this repo has no ${TRANSACTION_TABLES_RELATIVE}.`
-  );
-  console.error(
-    '  Nothing here declares which spec rules the repo claims to conform to, so there was no claim\n' +
+if (!existsSync(TRANSACTION_TABLES))
+  finish({
+    check: CHECK,
+    assertedCount: 0,
+    assertedUnit: 'conformance claims backed',
+    vacuousReason:
+      `this repo has no ${TRANSACTION_TABLES_RELATIVE}.\n` +
+      '  Nothing here declares which spec rules the repo claims to conform to, so there was no claim\n' +
       '  to back. Either point HP_FIXTURES_CONFIG at a repo that carries the file, or drop this check\n' +
-      '  from CHECKS so the removal is a decision with a diff.'
-  );
-  process.exit(VACUOUS);
-}
+      '  from CHECKS so the removal is a decision with a diff.',
+  });
 
 let spec;
 try {
   spec = JSON.parse(readFileSync(TRANSACTION_TABLES, 'utf8'));
 } catch (err) {
-  console.error(
-    `rule-coverage: ${TRANSACTION_TABLES_RELATIVE} is not valid JSON — ${err.message}`
+  setupError(
+    CHECK,
+    `${TRANSACTION_TABLES_RELATIVE} is not valid JSON — ${err.message}`
   );
-  process.exit(2);
 }
 
-if (!spec.rules || typeof spec.rules !== 'object') {
-  console.error(
-    `rule-coverage: ${TRANSACTION_TABLES_RELATIVE} carries no \`rules\` object. Nothing was asserted.`
+if (!spec.rules || typeof spec.rules !== 'object')
+  setupError(
+    CHECK,
+    `${TRANSACTION_TABLES_RELATIVE} carries no \`rules\` object.`
   );
-  process.exit(2);
-}
 
 const conforms = Object.keys(spec.rules)
   .filter(id => spec.rules[id]?.state === 'conforms')
@@ -100,8 +97,7 @@ for (const file of testFiles) {
   try {
     source = readFileSync(file, 'utf8');
   } catch (err) {
-    console.error(`rule-coverage: could not read ${relative} — ${err.message}`);
-    process.exit(2);
+    setupError(CHECK, `could not read ${relative} — ${err.message}`);
   }
   for (const title of source.matchAll(TITLE_RE)) {
     titles += 1;
@@ -124,28 +120,27 @@ for (const file of testFiles) {
 }
 
 console.log(
-  `rule-coverage: ${Object.keys(spec.rules).length} rules · ${conforms.length} marked conforms · ${testFiles.length} test files · ${titles} titles` +
+  `${CHECK}: ${Object.keys(spec.rules).length} rules · ${conforms.length} marked conforms · ${testFiles.length} test files · ${titles} titles` +
     (inertTitles ? ` (${inertTitles} failing/skipped, cited nothing)` : '')
 );
 
 // Tests this check stopped being able to parse would otherwise report every rule as unbacked, which
 // reads as a conformance problem rather than as the parser breaking.
-if (testFiles.length === 0 || titles === 0) {
-  console.error(
-    `\nrule-coverage: parsed ${titles} test titles from ${testFiles.length} test files. Nothing was asserted.`
+if (testFiles.length === 0 || titles === 0)
+  setupError(
+    CHECK,
+    `parsed ${titles} test titles from ${testFiles.length} test files.`
   );
-  process.exit(2);
-}
 
 let exempt = {};
 if (existsSync(EXEMPTIONS)) {
   try {
     exempt = JSON.parse(readFileSync(EXEMPTIONS, 'utf8')).exempt ?? {};
   } catch (err) {
-    console.error(
-      `rule-coverage: ${EXEMPTIONS_RELATIVE} is not valid JSON — ${err.message}`
+    setupError(
+      CHECK,
+      `${RULE_EXEMPTIONS_RELATIVE} is not valid JSON — ${err.message}`
     );
-    process.exit(2);
   }
 }
 
@@ -226,23 +221,21 @@ if (citedNonConforming.length) {
 // Printed on a pass too: these are the conformance claims a green run does not stand behind.
 if (Object.keys(exempt).length) {
   console.log(
-    `\n  ${Object.keys(exempt).length} rule(s) exempt in ${EXEMPTIONS_RELATIVE} — asserted by reading source, not by a test:`
+    `\n  ${Object.keys(exempt).length} rule(s) exempt in ${RULE_EXEMPTIONS_RELATIVE} — asserted by reading source, not by a test:`
   );
   for (const id of Object.keys(exempt).sort())
     console.log(`    ${id} — ${exempt[id]}`);
 }
 
-if (failures.length) {
-  console.error(`\nFAIL — ${failures.length} problem(s):`);
-  for (const failure of failures) console.error(`  ${failure}`);
-  console.error(
-    `\n  Either cite the rule from a test title — \`it('[RULE-ID] …')\`, or \`[RULE-3..8]\` for a span —\n` +
-      `  or, if it genuinely cannot be tested here, record it with its reason in ${EXEMPTIONS_RELATIVE}.\n` +
-      `  Downgrading the rule's state in ${TRANSACTION_TABLES_RELATIVE} is the third honest option.`
-  );
-  process.exit(1);
-}
-
-console.log(
-  '\nPASS — every conforming rule is cited by a test or exempt with a recorded reason'
-);
+finish({
+  check: CHECK,
+  assertedCount: conforms.length,
+  assertedUnit: 'conformance claims backed',
+  failures,
+  remediation:
+    `  Either cite the rule from a test title — \`it('[RULE-ID] …')\`, or \`[RULE-3..8]\` for a span —\n` +
+    `  or, if it genuinely cannot be tested here, record it with its reason in ${RULE_EXEMPTIONS_RELATIVE}.\n` +
+    `  Downgrading the rule's state in ${TRANSACTION_TABLES_RELATIVE} is the third honest option.`,
+  vacuousReason: `${TRANSACTION_TABLES_RELATIVE} marks no rule as conforming, so there was no claim to back.`,
+  pass: 'every conforming rule is cited by a test or exempt with a recorded reason',
+});

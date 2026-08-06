@@ -1,6 +1,6 @@
 {
   "name": "@heroplus/fe-test-kit",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Shared fixture-corpus integrity engine for the HeroPlus FE repos",
   "license": "UNLICENSED",
   "repository": {

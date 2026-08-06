@@ -35,6 +35,7 @@ const SHAPED = {
   readBody: 'async () => ({})',
   listCaptures: 'async () => []',
   SCRIPTS: '{}',
+  WIRE_CONVENTIONS: '{}',
 };
 
 const hostModule = (names, { checks = EVERY_CHECK, override = {} } = {}) => {
@@ -131,14 +132,15 @@ describe('per-check requirements', () => {
     assert.deepEqual(requiredNamesFor(hostOwned), [...CORE_CONFIG_NAMES].sort());
   });
 
-  test('SCRIPTS is optional', async () => {
-    const checks = [{ name: 'no-pan', kit: 'checks/no-pan.mjs' }];
-    const needed = requiredNamesFor(checks);
-    assert.ok(!needed.includes('SCRIPTS'));
-    process.env[CONFIG_VAR] = hostModule(needed, { checks });
-    const host = await loadHostConfig();
-    assert.equal(host.SCRIPTS, undefined);
-  });
+  for (const name of ['SCRIPTS', 'WIRE_CONVENTIONS'])
+    test(`${name} is optional`, async () => {
+      const checks = [{ name: 'no-pan', kit: 'checks/no-pan.mjs' }];
+      const needed = requiredNamesFor(checks);
+      assert.ok(!needed.includes(name));
+      process.env[CONFIG_VAR] = hostModule(needed, { checks });
+      const host = await loadHostConfig();
+      assert.equal(host[name], undefined);
+    });
 });
 
 describe('a wrong-shaped export', () => {
@@ -150,6 +152,7 @@ describe('a wrong-shaped export', () => {
     ['ORIGIN_RELATIVE', `'a-string-not-an-array'`],
     ['CORPUS_ROOT_FILES', '[1, 2]'],
     ['SCRIPTS', '[]'],
+    ['WIRE_CONVENTIONS', 'null'],
   ])
     test(`${name} is refused, not deferred to a TypeError mid-check`, async () => {
       process.env[CONFIG_VAR] = hostModule([...CONFIG_NAMES], {
@@ -197,14 +200,34 @@ describe('a malformed CHECKS entry', () => {
     assert.match(problems[0], /already used/);
   });
 
-  // A host check never reports `vacuous`, so a policy declared on one is a decision that does
-  // nothing — refused rather than accepted and ignored.
-  test('onVacuous on a host: entry is refused', () => {
-    const problems = validateChecks([
+  // A host check never reports `vacuous`, and an absent host file already fails the run outright, so
+  // either knob declared on one is a decision that does nothing — refused rather than silently ignored.
+  for (const [knob, entry, expected] of [
+    [
+      'onVacuous',
       { name: 'x', host: 'tools/x.mjs', onVacuous: 'warn' },
+      /`onVacuous` has no effect on a `host:` check/,
+    ],
+    [
+      'required',
+      { name: 'x', host: 'tools/x.mjs', required: true },
+      /`required` has no effect on a `host:` check/,
+    ],
+  ])
+    test(`${knob} on a host: entry is refused`, () => {
+      const problems = validateChecks([entry]);
+      assert.equal(problems.length, 1);
+      assert.match(problems[0], expected);
+    });
+
+  // One problem per mistake: a `host:` entry whose `required` is also wrong-typed must not report both
+  // the type and the inertness, or the table above stops being able to pin either.
+  test('a wrong-typed required on a host: entry reports only the type', () => {
+    const problems = validateChecks([
+      { name: 'x', host: 'tools/x.mjs', required: 'yes' },
     ]);
     assert.equal(problems.length, 1);
-    assert.match(problems[0], /no effect on a `host:` check/);
+    assert.match(problems[0], /must be true or false/);
   });
 
   test('a well-formed pair is accepted', () => {

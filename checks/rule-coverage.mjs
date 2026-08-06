@@ -129,7 +129,9 @@ console.log(
 if (testFiles.length === 0 || titles === 0)
   setupError(
     CHECK,
-    `parsed ${titles} test titles from ${testFiles.length} test files.`
+    `parsed ${titles} test titles from ${testFiles.length} file(s) matching ${TEST_FILE_RE} under REPO_ROOT.\n` +
+      "  A repo naming its tests `*-test.js` — React Native's default, and this package's own\n" +
+      '  convention for node:test suites — matches none of them.'
   );
 
 let exempt = {};

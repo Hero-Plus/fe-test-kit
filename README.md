@@ -11,7 +11,7 @@ the same check came to exist.
 ## Install
 
 ```json
-"@heroplus/fe-test-kit": "Hero-Plus/fe-test-kit#v1.0.0"
+"@heroplus/fe-test-kit": "Hero-Plus/fe-test-kit#v1.1.0"
 ```
 
 Public on purpose. A private git dependency cannot install where there is no credential — Vercel
@@ -102,9 +102,15 @@ unlisted files while the counts stay green and non-zero. Adding an extension is 
 Requirements are keyed off the **kit file** an entry names, not off the host's `name` for it, so
 renaming a check in `CHECKS` cannot silently drop its requirements.
 
-**Optional:** `SCRIPTS` — `{ verify, pinCells, listCells }`. Remediation messages name the host's own
-package-manager script when it is present, and fall back to a `node <path>` form when it is not.
-Declare it: the fallback is correct in every repo and idiomatic in none.
+**Optional — read by no check, and never required:**
+
+- `SCRIPTS` — `{ verify, pinCells, listCells }`. Remediation messages name the host's own
+  package-manager script when it is present, and fall back to a `node <path>` form when it is not.
+  Declare it: the fallback is correct in every repo and idiomatic in none.
+- `WIRE_CONVENTIONS` — the object a host passes to `makeShapes`. Nothing in the engine reads it; it is
+  on the contract so that a host carrying it is not carrying a name the contract does not know about,
+  and so a wrong-*typed* one is refused here rather than at the `makeShapes` call. The **values** are
+  still `makeShapes`' business — it checks each against what its shape does with it.
 
 ### Validation
 
@@ -268,6 +274,11 @@ error (exit 2)**, because the host named it.
 literally — 0 asserted, 1 failed, 2 setup error, and 3 only if it happens to use it — and `onVacuous`
 is inert for one, so declaring it on a `host:` entry is refused rather than accepted and ignored.
 
+**`required` is refused on a `host:` entry for the same reason.** It is consulted only where a `kit:`
+file is absent, which can only be a packaging failure; a `host:` file the repo named and does not carry
+already fails the run outright, so the flag cannot change any outcome. Both refusals are validation
+errors listing the entry by index — exit **2**.
+
 The check set is the host's rather than a list in this file: a list here could not express one repo
 running four checks and another six, and auto-discovery would leave this file byte-identical across the
 repos while making check-set divergence between them invisible.
@@ -326,8 +337,14 @@ export const enumerateCells = makeRegistryParser({
   auxConstruct: 'deepFreeze',
   listPageRelative: LIST_PAGE_RELATIVE,
   listRowsKey: 'purchases',
+  views: ['detail', 'list'], // the default; widen it, never narrow it
 });
 ```
+
+**`views` may only be widened.** The parser emits `detail` and `list` cells and nothing else, so it is
+there for a host whose corpus carries a further view resolved by other means — declare the union and
+the vocabulary stays honest. Drop either default and the result contradicts its own cells: `cell-map`
+requires every `view` a cell carries to appear in `views`, and exits **2** on the disagreement.
 
 Every representation choice the old parser hardcoded is a parameter here. `listPageRelative` and
 `listRowsKey` describe a page-and-rows list model, which is one repo's, so they left the config
@@ -335,14 +352,28 @@ contract and live here. The scenario-key pattern is deliberately wider than any 
 the parser misses resolves no cell and reports nothing, and a match still has to land on an imported
 body to enter the result.
 
-## The harness contract
+## The harness contracts
 
-`harness/by-accessible-name.d.ts`, deep-imported as
-`@heroplus/fe-test-kit/harness/by-accessible-name`. **Type-only** — `import type` is erased before a
-bundler sees the specifier, so exporting a value there type-checks and then fails at bundle time in
-React Native. If resolution ever regresses, the fix is a `types` or `typesVersions` entry here, never a
-per-repo copy: a byte-identical copy is byte-identical on day one and divergent on day thirty with
-nothing comparing them.
+Three declaration files under `harness/`, deep-imported as `@heroplus/fe-test-kit/harness/<name>`:
+
+| File | Declares |
+|---|---|
+| `by-accessible-name.d.ts` | `AccessibleNameQueries<TElement>` |
+| `mock-server.d.ts` | `ScenarioResponse`, `Scenario`, `ScenarioSelector<S>` |
+| `conformance.d.ts` | `DisplayStatus`, `ConformanceCase`, `ConformanceTable`, `DisplayStatusFn` |
+
+**All three ship zero runtime and must stay that way** — `import type` is erased before a bundler sees
+the specifier, so exporting a value from one type-checks and then fails at bundle time in React Native.
+If resolution ever regresses, the fix is a `types` or `typesVersions` entry here, never a per-repo copy:
+a byte-identical copy is byte-identical on day one and divergent on day thirty with nothing comparing
+them.
+
+**A contract nobody annotates with is inert.** A factory returning a bare object literal types nothing
+*through* a declaration, so no drift becomes a `tsc` error. Annotate the return —
+`createMockServer<S>(…): ScenarioSelector<S> & { listen(): void; close(): void; reset(): void }`, or
+`interface MockServer extends ScenarioSelector<Scenarios>` — or the deep import buys nothing.
+
+### `by-accessible-name` — a property, never a query
 
 What is shared is a **property**, never a query. Sharing the query is what broke the first attempt: the
 web bodies use `getByRole('group')` and `getByRole('region')`, and React Native's `AccessibilityRole`
@@ -392,6 +423,73 @@ and owes a TalkBack pass.
 
 `scope` stays optional on `rowFor` because `getByRole` throws on multiple matches — two rows sharing a
 child text, a date or a status, name each other — where a scoped lookup does not.
+
+### `mock-server` — what a scenario is, and how one is selected
+
+```ts
+interface ScenarioResponse { data: object | null; status: number }
+type Scenario = () => ScenarioResponse;
+interface ScenarioSelector<S> {
+  select<K extends keyof S>(route: K, scenario: keyof NonNullable<S[K]> & string): void;
+}
+```
+
+`{ data, status }` and "a scenario is a zero-argument function" are the shared part — what a fourth repo
+copies, and what a captured body is fed through in the two that have one today. `data` is spelled
+`object | null` because that is what `HttpResponse.json` accepts; a wider `unknown` only moves the cast
+to the call site. What is deliberately **not** here:
+
+- **No `ScenarioMap`.** A `Record<string, Record<string, Scenario>>` constraint rejects a map declared
+  `Partial<Record<Path, …>>`, whose values are `… | undefined`. The map stays each repo's own: `S` is
+  unconstrained and `NonNullable<S[K]>` absorbs the difference. Without the `NonNullable`,
+  `keyof (X | undefined)` is `never` and every scenario name silently becomes unassignable.
+- **No lifecycle, and no `useResponse`.** `listen` / `close` / `reset` differ by design between an
+  `msw/node` and an `msw/native` setup, and `useResponse` exists in one repo — either on the contract
+  leaves the other carrying an implemented-and-unused member.
+
+**`select` is generic over the map, never over a route-key type.** Under a wide `K extends string` every
+scenario name collapses to `string`, so any key is accepted and a typo surfaces only at run time.
+
+**`select` is declared as a method, and that is load-bearing.** Only a method compares its parameters
+bivariantly. As an arrow property it is contravariant, and an implementation spelling its own signature
+`keyof S[K]` — which is how a factory generic over its map writes it — is then rejected outright.
+Measured against TypeScript 5.8.3 and 5.9.3 on 2026-08-06.
+
+### `conformance` — the projected case table
+
+```ts
+type DisplayStatus =
+  | "Completed" | "Pending" | "Processing" | "Requested" | "PartiallyRefunded"
+  | "PreAuthorized" | "Declined" | "Refunded" | "Canceled" | "Unknown";
+
+interface ConformanceCase  { rule: string; name: string;
+                             input: unknown; expected: DisplayStatus }
+interface ConformanceTable { sourceTable: string;
+                             vocabulary: DisplayStatus[]; rows: ConformanceCase[];
+                             notProjected?: { rule: string; reason: string }[] }
+type DisplayStatusFn = (input: ConformanceCase["input"]) => DisplayStatus;
+```
+
+Types a **case projection** of a spec predicate table: rows of `input → expected` derived from the
+table, against which a repo runs its own status function. The projection is data derived from the spec,
+never shared implementation — each repo keeps its own function.
+
+**Not every rule in a table is projectable, and `notProjected` is why the gap is not silent.** A rule
+whose input is the display status rather than the wire body — a tone, a label fallback — cannot be
+written as `input → expected`. Projected anyway, a repo passes every row for it while still getting the
+rule wrong, and its ledger reads that as conformance. Such rules stay in the ledger, adjudicated by
+hand; they are listed here with a reason, and no test title cites them.
+
+**`DisplayStatus` is the spec's vocabulary and no one repo's status enum.** Each repo maps its own enum
+into it. A helper typed to return `string` would let a typo'd output pass `toBe(expected)` and leave the
+case file's `vocabulary` decorative, which is why the union lives here and not in the JSON alone.
+
+**`input` is wire-shaped**, in the field names the spec table uses, and each repo asserts it to its own
+wire type before building a model from it. It is typed `unknown` rather than `Record<string, unknown>`
+for that assertion's sake: a repo's wire type is an interface, an interface has no implicit index
+signature, and TypeScript therefore refuses `Record<string, unknown> as WireThing` outright — the
+narrower spelling would force `as unknown as` at every call site in every repo. Measured against both
+consumers on 2026-08-06.
 
 ## Migrating from v0.1.3
 
@@ -451,3 +549,9 @@ either:
 
 Unit suites are named `*-test.mjs`, not `*.test.mjs`: jest's default `testMatch` claims the dotted
 form, and jest cannot execute `node:test`.
+
+**`rule-coverage` scans the host's tests by the dotted form only** — `*.test.js`, `.jsx`, `.ts`, `.tsx`,
+`.cjs`, `.mjs`. A React Native repo following the community `*-test.js` default matches **zero** files,
+and the check exits **2** naming the pattern it scanned rather than reporting every conforming rule as
+unbacked. Renaming the suites is the fix. It is an adoption constraint rather than a preference, and it
+is the one place where this package's own naming and the naming it requires of a host differ.

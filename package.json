@@ -1,6 +1,6 @@
 {
   "name": "@heroplus/fe-test-kit",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Shared fixture-corpus integrity engine for the HeroPlus FE repos",
   "license": "UNLICENSED",
   "repository": {
@@ -16,13 +16,15 @@
     "hp-fixtures-verify": "./verify.mjs",
     "hp-fixtures-no-pan": "./checks/no-pan.mjs",
     "hp-fixtures-cell-map": "./checks/cell-map.mjs",
+    "hp-fixtures-mint": "./mint.mjs",
     "hp-fixtures-config-test": "./config-test.mjs",
     "hp-fixtures-luhn-test": "./lib/luhn-test.mjs",
+    "hp-fixtures-mint-test": "./lib/mint-test.mjs",
     "hp-fixtures-outcomes-test": "./outcomes-test.mjs",
     "hp-fixtures-parser-test": "./lib/registry-parser-test.mjs",
     "hp-fixtures-shapes-test": "./shapes-test.mjs"
   },
   "scripts": {
-    "test": "node --test config-test.mjs && node --test lib/luhn-test.mjs && node --test shapes-test.mjs && node --test lib/registry-parser-test.mjs && node --test outcomes-test.mjs && node --test verify-test.mjs"
+    "test": "node --test config-test.mjs && node --test lib/luhn-test.mjs && node --test shapes-test.mjs && node --test lib/registry-parser-test.mjs && node --test outcomes-test.mjs && node --test lib/mint-test.mjs && node --test verify-test.mjs"
   }
 }

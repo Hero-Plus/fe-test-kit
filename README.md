@@ -297,8 +297,10 @@ and pnpm, which lay `node_modules` out differently.
 | `hp-fixtures-verify` | `verify.mjs` | runs this repo's checks and every unit suite |
 | `hp-fixtures-no-pan` | `checks/no-pan.mjs` | card-number scan; the one check CI runs alone |
 | `hp-fixtures-cell-map` | `checks/cell-map.mjs` | `--write` regenerates the manifest, `--list` prints it |
+| `hp-fixtures-mint` | `mint.mjs` | caches a fixture token for one host and region |
 | `hp-fixtures-config-test` | `config-test.mjs` | the config contract |
 | `hp-fixtures-luhn-test` | `lib/luhn-test.mjs` | card-number detector unit suite |
+| `hp-fixtures-mint-test` | `lib/mint-test.mjs` | the minter's control flow, against a local stub |
 | `hp-fixtures-outcomes-test` | `outcomes-test.mjs` | the outcome vocabulary, against scratch repos |
 | `hp-fixtures-parser-test` | `lib/registry-parser-test.mjs` | the opt-in registry parser |
 | `hp-fixtures-shapes-test` | `shapes-test.mjs` | placeholder-shape unit suite |
@@ -490,6 +492,136 @@ for that assertion's sake: a repo's wire type is an interface, an interface has 
 signature, and TypeScript therefore refuses `Record<string, unknown> as WireThing` outright — the
 narrower spelling would force `as unknown as` at every call site in every repo. Measured against both
 consumers on 2026-08-06.
+
+## The fixture-token minter
+
+Recapture needs a `merchant_user` token. Each repo used to obtain one its own way — a human pasting
+into `.env`, a per-run mint with nothing persisted, a clock-based freshness check — so the mint, the
+cache and the 401 discipline live here once and each repo wires them in about twenty lines.
+
+**Import it from the package root**, not by subpath. Deep imports work today only because this
+package ships no `exports` map, and the day one is added for any subpath every undeclared deep import
+breaks in all three consumers at once. The root is insulated from that.
+
+```js
+import { resolveAccount, withFreshToken } from '@heroplus/fe-test-kit';
+
+const body = await withFreshToken(
+  {
+    baseUrl,
+    region,
+    account: resolveAccount(region),
+    explicitToken: process.env.HP_DEV_ACCESS_TOKEN,
+    explicitTokenSource: 'HP_DEV_ACCESS_TOKEN',
+  },
+  authorization => fetch(url, { headers: { Authorization: authorization } })
+);
+```
+
+| Export | Purpose |
+|---|---|
+| `withFreshToken({ baseUrl, region, account, cacheDir, explicitToken, explicitTokenSource, fetchImpl }, perform)` | the whole dance; the only one a consumer normally calls |
+| `assertMintableHost(baseUrl)` | throws unless this host may be minted against |
+| `mintToken({ baseUrl, account, fetchImpl })` | the two POSTs; returns `Bearer <jwt>` |
+| `readCachedToken({ baseUrl, region, cacheDir })` | the cached string, or `null` |
+| `writeCachedToken({ baseUrl, region, cacheDir, authorization })` | atomic write; returns the path |
+| `invalidateCachedToken({ baseUrl, region, cacheDir })` | deletes it; returns the path |
+| `cachePathFor({ baseUrl, region, cacheDir })` | where it lives, for telling a human |
+
+Failures throw with a `code`: `HOST_REFUSED`, `RATE_LIMITED` (plus `retryAfter`), `SIGNUP_FAILED`,
+`NO_TOKEN`, `EXPLICIT_TOKEN_REJECTED`, `STILL_UNAUTHORIZED`, `BAD_ACCOUNT`, `BAD_CALL`.
+
+### What `perform` must do, and what it may return
+
+`perform(authorization)` receives the full `Bearer <jwt>` string and performs one request. A rejection
+is recognised **either** as a returned object whose `status` is `401` **or** as a thrown error whose
+`status` is `401` — both, because one consumer's HTTP client returns the response and the other
+throws, and neither should have to adapt to the other. Anything else is passed through untouched.
+
+### Staleness comes from the server, never from a clock
+
+These JWTs carry `exp` in 2029 and the backend revokes them long before that: two of three credentials
+measured on 2026-08-07 returned 401 while their `exp` read 2029-05-03. An expiry pre-flight passes both.
+
+```
+cached token exists?  → use it
+  request returns 401? → invalidate, mint ONCE, replace the cache, retry the request ONCE
+    still 401?         → fail loudly. No loop. No second mint.
+no cached token?      → mint, cache, proceed
+mint returns 429?     → fail, naming retry_after. Never tight-retry.
+```
+
+`explicitToken` wins over the cache, is normalised from either a bare or a `Bearer `-prefixed string,
+and is **never written to the cache** — it is not the minter's to own. By the same reasoning a rejected
+one is not silently replaced: it fails as `EXPLICIT_TOKEN_REJECTED`, so a dead CI secret stays visible
+as a dead CI secret instead of becoming a mint on every run. Pass `explicitTokenSource` with the name
+of whatever supplied it — the repos read different variables, and the operator's next action is to
+rotate one of them.
+
+### The cache — one file per host and region, shared by every repo
+
+`~/.heroplus/fixture-tokens/<sanitised-host>--<REGION>.tok`, file `0600` inside a `0700` directory,
+holding the full `Bearer <jwt>` with no trailing newline. `HP_FIXTURE_TOKEN_DIR` overrides the
+directory; `cacheDir` overrides both.
+
+It is **shared across repos** because `signup/ip/long` allows only 5 mints per hour per IP, and a cache
+per repo spends that budget once per repo. It is keyed by **resolved host** — including the port,
+which is what keeps two local stubs distinct — because the repos resolve their base URL asymmetrically:
+RN falls back to dev when `HP_DEV_API_URL` is unset, while merchant's `NEXT_PUBLIC_API_URL` has no
+default and fails closed. A region-only key would hand one repo the other environment's token, which
+surfaces as a confusing 401 rather than loudly.
+
+Writes go through a temp file and an atomic `rename`, and after minting the cache is re-read: two
+repos can recapture at once, and a sibling's token is no older than one you just minted, so converging
+on it beats overwriting it.
+
+### Minting is refused against production
+
+The fixture account is a live production merchant login, and both an explicit argument and
+`HP_DEV_API_URL` can point at production — so the guard reads the **resolved** base URL, not whatever
+named it.
+
+- **Mintable:** `dev.heroplusgroup.com`, `staging.heroplusgroup.com`.
+- **Also mintable**, because no real credential can exist there: `localhost`, `127.0.0.0/8`, `[::1]`,
+  and any host under `.test`, `.localhost`, `.invalid` or `.example`. This clause is load-bearing —
+  the control-flow proof is an HTTP stub on `127.0.0.1`, and removing the clause reddens 13 of
+  `lib/mint-test.mjs`'s cases.
+- **Everything else is refused**, `app.heroplusgroup.com` named in the message. An unrecognised host
+  such as `uat.heroplusgroup.com` is refused deliberately, so adding an environment stays a decision.
+
+### Five throttles gate signup, not one
+
+`merchant_signup` is throttled by IP (3 per minute *and* 5 per hour), by phone number (2 per 10
+minutes), by country code (5 per 10 minutes), and globally (10 per minute). A 429 therefore cannot tell
+you which one fired, which is why the minter surfaces `retry_after`, names all five, and never retries.
+Two consequences worth planning around: a cold three-region run leaves only two more region-mints in
+the same rolling hour, and re-minting the *same* region twice inside ten minutes is blocked by a
+throttle no shared cache can help with.
+
+### The account table
+
+`lib/fixture-accounts.mjs` carries TH, HK and MY. `resolveAccount(region, { repoAccounts })` resolves
+through `~/.heroplus/fixture-accounts.json` → the repo's own table, if it ships one → the kit default,
+so a machine or CI substitutes without a diff. `HP_FIXTURE_ACCOUNTS_FILE` moves the first tier, and a
+`machineFile` option overrides both. A region missing from one tier falls through to the next rather
+than failing, and a half-filled account is refused naming the tier it came from — otherwise a bad
+override reaches the wire and returns a 422 that points at no one. **No repo needs a table** unless it
+has a region the kit does not carry. The TH account is the one that is also a production login, and is
+why the host guard exists.
+
+### `hp-fixtures-mint`
+
+```
+hp-fixtures-mint --base-url <url> --region <TH|HK|MY> [--cache-dir <dir>] [--force]
+```
+
+Mints only if nothing is cached, and prints the **cache file path** on stdout — never the token, and
+there is deliberately no flag that prints it. Minting runs inline in an orchestrated session, so this
+command's stdout is a transcript. Read the value with `readCachedToken`. `--force` mints over a cached
+token and spends one of five mints per hour.
+
+Exit codes follow the outcome vocabulary as far as they apply: `0` cached or minted, `1` the mint
+failed, `2` the arguments or the host were unusable.
 
 ## Migrating from v0.1.3
 

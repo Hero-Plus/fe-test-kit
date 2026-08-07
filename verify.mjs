@@ -36,6 +36,7 @@ const RESET = '\x1b[0m';
 const UNIT_SUITES = [
   { name: 'config-unit', kit: 'config-test.mjs', required: true },
   { name: 'detector-unit', kit: 'lib/luhn-test.mjs', required: true },
+  { name: 'mint-unit', kit: 'lib/mint-test.mjs', required: true },
   { name: 'outcomes-unit', kit: 'outcomes-test.mjs', required: true },
   { name: 'parser-unit', kit: 'lib/registry-parser-test.mjs', required: true },
   { name: 'shapes-unit', kit: 'shapes-test.mjs', required: true },
